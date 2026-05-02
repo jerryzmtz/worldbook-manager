@@ -10,6 +10,10 @@ let styleHandle: { destroy: () => void } | null = null;
 let $appRoot: JQuery<HTMLDivElement> | null = null;
 let buttonEventHandle: EventOnReturn | null = null;
 
+function managerButton(button: Partial<ScriptButton> = {}): ScriptButton {
+  return { ...button, name: OPEN_MANAGER_BUTTON, visible: true };
+}
+
 $(() => {
   $appRoot = createScriptIdDiv();
   $appRoot.css('display', 'contents');
@@ -33,7 +37,7 @@ function syncManagerButton(): void {
     for (const button of buttons) {
       if (LEGACY_OPEN_MANAGER_BUTTONS.includes(button.name)) {
         if (!hasCurrentButton && !insertedCurrentButton) {
-          nextButtons.push({ ...button, name: OPEN_MANAGER_BUTTON });
+          nextButtons.push(managerButton(button));
           insertedCurrentButton = true;
         }
         continue;
@@ -41,7 +45,7 @@ function syncManagerButton(): void {
 
       if (button.name === OPEN_MANAGER_BUTTON) {
         if (!insertedCurrentButton) {
-          nextButtons.push(button);
+          nextButtons.push(managerButton(button));
           insertedCurrentButton = true;
         }
         continue;
@@ -51,7 +55,7 @@ function syncManagerButton(): void {
     }
 
     if (!insertedCurrentButton) {
-      nextButtons.push({ name: OPEN_MANAGER_BUTTON, visible: true });
+      nextButtons.push(managerButton());
     }
 
     return nextButtons;
