@@ -3,7 +3,10 @@
     <section class="wbm-dialog" role="dialog" aria-modal="true" aria-label="世界书缓存优化器">
       <header class="wbm-header">
         <div>
-          <h2>世界书缓存优化器</h2>
+          <div class="wbm-title-line">
+            <h2>世界书缓存优化器</h2>
+            <span class="wbm-version">{{ APP_VERSION }}</span>
+          </div>
         </div>
         <div class="wbm-header-actions">
           <button
@@ -286,6 +289,21 @@
               </select>
             </label>
             <div class="wbm-filter-stats" aria-live="polite">{{ visiblePreviewStats.label }}</div>
+            <div
+              v-if="previewRows.length > 0"
+              class="wbm-blue-token-stats"
+              :class="{ warning: postApplyBlueTokenStats.isOverThreshold }"
+              aria-live="polite"
+            >
+              <i
+                class="fa-solid"
+                :class="postApplyBlueTokenStats.isOverThreshold ? 'fa-triangle-exclamation' : 'fa-circle-info'"
+              ></i>
+              <span>{{ postApplyBlueTokenStats.label }}</span>
+              <strong v-if="postApplyBlueTokenStats.isOverThreshold">
+                已超过 {{ blueTokenWarningThresholdLabel }}，应用前需再次确认
+              </strong>
+            </div>
           </div>
           <div class="wbm-card-list">
             <article
@@ -906,6 +924,24 @@
           </div>
         </div>
       </div>
+      <div v-if="blueTokenWarningState.open" class="wbm-confirm" @click.self="cancelBlueTokenWarning">
+        <div class="wbm-confirm-box wbm-token-warning-box" role="dialog" aria-modal="true" aria-label="蓝灯 Token 过高">
+          <h3>蓝灯 Token 过高</h3>
+          <p>
+            应用后将有 {{ postApplyBlueTokenStats.count }} 个蓝灯条目，预计
+            {{ postApplyBlueTokenStats.tokenLabel }} {{ postApplyBlueTokenStats.formattedTokenCount }}，已超过
+            {{ blueTokenWarningThresholdLabel }}Tokens。应用修改可能导致上下文超限或AI请求直接失败，是否继续应用修改？
+          </p>
+          <label class="wbm-toggle-line wbm-confirm-option">
+            <input v-model="blueTokenWarningState.doNotShowAgain" type="checkbox" />
+            <span>不再显示这个提醒</span>
+          </label>
+          <div class="wbm-dialog-actions">
+            <button class="wbm-small-btn" type="button" @click="cancelBlueTokenWarning">取消</button>
+            <button class="wbm-danger-btn" type="button" @click="confirmBlueTokenWarning">仍然应用</button>
+          </div>
+        </div>
+      </div>
     </section>
   </div>
 </template>
@@ -913,6 +949,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { createWorldbookTutorial } from './tutorial';
+
+const APP_VERSION = 'v1.1';
 
 type PreviewStatus = 'changed' | 'unchanged' | 'filtered' | 'failed';
 type PreviewFilter = 'changed' | 'review' | 'all';
@@ -1042,6 +1080,11 @@ type ConfirmState = {
   open: boolean;
   bookCount: number;
   changeCount: number;
+  doNotShowAgain: boolean;
+};
+
+type BlueTokenWarningState = {
+  open: boolean;
   doNotShowAgain: boolean;
 };
 
@@ -1204,6 +1247,8 @@ const DATABASE_PLUGIN_RULE_LABEL = '数据库插件条目';
 const DATABASE_PLUGIN_STATUS_TEXT = '请单独设置数据库';
 const ENTRY_COOLDOWN_RISK_LABEL = '条目冷却设置';
 const APPLY_WARNING_DISMISSED_KEY = 'worldbook_manager_apply_warning_dismissed_v1';
+const BLUE_TOKEN_WARNING_DISMISSED_KEY = 'worldbook_manager_blue_token_warning_dismissed_v1';
+const BLUE_TOKEN_WARNING_THRESHOLD = 400_000;
 const VISUAL_VIEWPORT_CSS_VAR = '--wbm-vvh';
 let tokenCounterPromise: Promise<TokenCounter | null> | null = null;
 let metadataRunId = 0;
@@ -1348,6 +1393,8 @@ const contentEditDrafts = ref<Record<string, string>>({});
 const ruleHelpOpen = ref(false);
 const confirmState = reactive<ConfirmState>({ open: false, bookCount: 0, changeCount: 0, doNotShowAgain: false });
 const applyWarningDismissed = ref(readApplyWarningDismissed());
+const blueTokenWarningState = reactive<BlueTokenWarningState>({ open: false, doNotShowAgain: false });
+const blueTokenWarningDismissed = ref(readBlueTokenWarningDismissed());
 const structureState = reactive<StructureState>({ open: false });
 const structureGraphMode = ref<StructureGraphMode>('changed');
 const customEditorState = reactive<CustomEditorState>({
@@ -1558,6 +1605,23 @@ const visiblePreviewStats = computed(() => {
     label: `${rows.length} 条 · ${tokenLabel}${tokenCount}`,
   };
 });
+
+const postApplyBlueTokenStats = computed(() => {
+  const rows = previewRows.value.filter(
+    row => row.status !== 'failed' && row.nextEnabled && row.nextStrategyType === 'constant',
+  );
+  const tokenCount = rows.reduce((sum, row) => sum + row.tokenCount, 0);
+  const tokenLabel = rows.some(row => row.tokenIsEstimated) ? 'Token≈' : 'Token';
+  return {
+    count: rows.length,
+    tokenCount,
+    tokenLabel,
+    formattedTokenCount: formatTokenCount(tokenCount),
+    isOverThreshold: tokenCount > BLUE_TOKEN_WARNING_THRESHOLD,
+    label: `修改后蓝灯 ${rows.length} 条 · ${tokenLabel} ${formatTokenCount(tokenCount)}`,
+  };
+});
+const blueTokenWarningThresholdLabel = formatTokenCount(BLUE_TOKEN_WARNING_THRESHOLD);
 
 const hasPrioritySort = computed(() => previewRows.value.some(row => row.priorityValue !== null));
 
@@ -1808,6 +1872,7 @@ function openManager(): void {
   isOpen.value = true;
   syncVisualViewportHeight();
   applyWarningDismissed.value = readApplyWarningDismissed();
+  blueTokenWarningDismissed.value = readBlueTokenWarningDismissed();
   selectionInitialized.value = false;
   if (apiReady.value) {
     void loadWorldbooks();
@@ -1821,6 +1886,7 @@ function closeManager(): void {
   tutorial.close();
   ruleHelpOpen.value = false;
   confirmState.open = false;
+  blueTokenWarningState.open = false;
   structureState.open = false;
   closeCustomEditor();
 }
@@ -2376,7 +2442,7 @@ function confirmApply(): void {
   confirmState.doNotShowAgain = false;
   closeTransientModals();
   if (applyWarningDismissed.value) {
-    void applyChanges();
+    void continueAfterBackupWarning();
     return;
   }
   confirmState.open = true;
@@ -2385,6 +2451,10 @@ function confirmApply(): void {
 
 function cancelConfirm(): void {
   confirmState.open = false;
+}
+
+function cancelBlueTokenWarning(): void {
+  blueTokenWarningState.open = false;
 }
 
 function openStructureModal(): void {
@@ -2429,6 +2499,7 @@ function closeRuleHelp(): void {
 function closeTransientModals(): void {
   ruleHelpOpen.value = false;
   confirmState.open = false;
+  blueTokenWarningState.open = false;
   customEditorState.open = false;
 }
 
@@ -2491,6 +2562,26 @@ async function applyChanges(): Promise<void> {
     persistApplyWarningDismissed();
   }
   confirmState.open = false;
+  await continueAfterBackupWarning();
+}
+
+async function continueAfterBackupWarning(): Promise<void> {
+  if (!canApply.value) return;
+  if (postApplyBlueTokenStats.value.isOverThreshold && !blueTokenWarningDismissed.value) {
+    blueTokenWarningState.doNotShowAgain = false;
+    blueTokenWarningState.open = true;
+    scheduleModalViewportSync();
+    return;
+  }
+  await applyChangesDirect();
+}
+
+async function confirmBlueTokenWarning(): Promise<void> {
+  if (!canApply.value) return;
+  if (blueTokenWarningState.doNotShowAgain) {
+    persistBlueTokenWarningDismissed();
+  }
+  blueTokenWarningState.open = false;
   await applyChangesDirect();
 }
 
@@ -2558,6 +2649,26 @@ function persistApplyWarningDismissed(): void {
   }
 }
 
+function readBlueTokenWarningDismissed(): boolean {
+  if (typeof getVariables !== 'function') return false;
+  try {
+    return getVariables({ type: 'script' })[BLUE_TOKEN_WARNING_DISMISSED_KEY] === true;
+  } catch (error) {
+    console.warn(`[世界书缓存优化器] 读取蓝灯 Token 提醒设置失败：${formatError(error)}`);
+    return false;
+  }
+}
+
+function persistBlueTokenWarningDismissed(): void {
+  blueTokenWarningDismissed.value = true;
+  if (typeof updateVariablesWith !== 'function') return;
+  try {
+    updateVariablesWith(variables => ({ ...variables, [BLUE_TOKEN_WARNING_DISMISSED_KEY]: true }), { type: 'script' });
+  } catch (error) {
+    console.warn(`[世界书缓存优化器] 保存蓝灯 Token 提醒设置失败：${formatError(error)}`);
+  }
+}
+
 function safeCall<T>(callback: () => T, fallback: T): T {
   try {
     return callback();
@@ -2574,7 +2685,7 @@ function syncVisualViewportHeight(): void {
     document.body.clientHeight ||
     640;
   document.documentElement.style.setProperty(VISUAL_VIEWPORT_CSS_VAR, `${Math.max(320, Math.round(height))}px`);
-  if (ruleHelpOpen.value || confirmState.open || customEditorState.open) {
+  if (ruleHelpOpen.value || confirmState.open || blueTokenWarningState.open || customEditorState.open) {
     scheduleModalViewportSync();
   }
 }
@@ -2614,6 +2725,7 @@ async function resolveTokenCounter(): Promise<TokenCounter | null> {
   if (windowCounter) return windowCounter;
 
   try {
+    // eslint-disable-next-line import-x/no-unresolved -- SillyTavern serves this host runtime module.
     const tokenizerModule = (await import(/* webpackIgnore: true */ '/scripts/tokenizers.js')) as Record<
       string,
       unknown
@@ -2647,6 +2759,10 @@ function normalizeTokenCount(value: unknown): number {
 function estimateTokenCount(text: string): number {
   if (!text) return 0;
   return Math.max(1, Math.ceil(text.length / 3));
+}
+
+function formatTokenCount(value: number): string {
+  return Math.max(0, Math.ceil(value)).toLocaleString('en-US');
 }
 
 function setEntryAction(row: PreviewChange, event: Event): void {
@@ -4345,6 +4461,22 @@ select:disabled {
   margin: 0;
 }
 
+.wbm-title-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.wbm-version {
+  color: var(--wbm-muted);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  opacity: 0.78;
+}
+
 .wbm-header p {
   margin: 6px 0 0;
 }
@@ -4814,6 +4946,43 @@ select:disabled {
 
 .wbm-filter-stats {
   display: none;
+}
+
+.wbm-blue-token-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-height: 34px;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 1px solid rgba(77, 107, 254, 0.28);
+  border-radius: var(--wbm-radius-md);
+  background: var(--wbm-blue-softer);
+  color: var(--wbm-muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.wbm-blue-token-stats span,
+.wbm-blue-token-stats strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.wbm-blue-token-stats.warning {
+  border-color: rgba(239, 68, 68, 0.88);
+  background: rgba(239, 68, 68, 0.18);
+  color: #fecaca;
+  box-shadow:
+    0 0 0 1px rgba(239, 68, 68, 0.18),
+    0 10px 26px rgba(127, 29, 29, 0.24);
+}
+
+.wbm-blue-token-stats.warning i,
+.wbm-blue-token-stats.warning strong {
+  color: #ffffff;
 }
 
 .wbm-risk-list {
@@ -5384,6 +5553,15 @@ select:disabled {
   margin: 12px 0 4px;
   color: var(--wbm-muted);
   font-weight: 700;
+}
+
+.wbm-token-warning-box {
+  border-color: rgba(239, 68, 68, 0.78);
+  box-shadow: 0 24px 80px rgba(127, 29, 29, 0.28);
+}
+
+.wbm-token-warning-box h3 {
+  color: #fca5a5;
 }
 
 .wbm-rule-help-box {
@@ -6073,6 +6251,12 @@ select:disabled {
     border-radius: var(--wbm-radius-md);
     color: var(--wbm-muted);
     background: var(--wbm-blue-softer);
+    font-size: 12px;
+  }
+
+  .wbm-blue-token-stats {
+    grid-column: 1 / -1;
+    width: 100%;
     font-size: 12px;
   }
 
