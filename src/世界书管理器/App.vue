@@ -1,34 +1,52 @@
 <template>
   <div v-if="isOpen" ref="managerRootElement" class="wbm-overlay" @click.self="closeManager">
-    <section class="wbm-dialog" role="dialog" aria-modal="true" aria-label="世界书缓存优化器">
+    <section
+      class="wbm-dialog"
+      :class="{ 'cache-mode': activePanel === 'cacheInspector' }"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="activePanel === 'cacheInspector' ? '缓存命中对比' : '世界书缓存优化器'"
+    >
       <header class="wbm-header">
         <div>
           <div class="wbm-title-line">
-            <h2>世界书缓存优化器</h2>
+            <h2>{{ activePanel === 'cacheInspector' ? '缓存命中对比' : '世界书缓存优化器' }}</h2>
             <span class="wbm-version">{{ APP_VERSION }}</span>
           </div>
         </div>
         <div class="wbm-header-actions">
           <button
+            v-if="activePanel === 'optimizer' || activePanel === 'cacheInspector'"
             class="wbm-icon-btn wbm-tutorial-trigger"
             type="button"
-            title="播放教程"
-            aria-label="播放教程"
+            :title="activePanel === 'cacheInspector' ? '播放缓存命中对比教程' : '播放教程'"
+            :aria-label="activePanel === 'cacheInspector' ? '播放缓存命中对比教程' : '播放教程'"
             data-wbm-tutorial-trigger
-            :disabled="isBusy"
+            :disabled="activePanel === 'optimizer' && isBusy"
             @click="startTutorial"
           >
             <i class="fa-solid fa-circle-question"></i>
           </button>
-          <button class="wbm-icon-btn" type="button" title="关闭" :disabled="isBusy" @click="closeManager">
+          <button
+            class="wbm-icon-btn"
+            type="button"
+            title="关闭"
+            :disabled="activePanel === 'optimizer' && isBusy"
+            @click="closeManager"
+          >
             <i class="fa-solid fa-times"></i>
           </button>
         </div>
       </header>
 
-      <div v-if="!apiReady" class="wbm-alert wbm-alert-error">世界书 API 不可用，无法读取或修改世界书。</div>
+      <div v-if="activePanel === 'optimizer' && !apiReady" class="wbm-alert wbm-alert-error">
+        世界书 API 不可用，无法读取或修改世界书。
+      </div>
+
+      <CacheInspectorPanel v-if="activePanel === 'cacheInspector'" />
 
       <section
+        v-if="activePanel === 'optimizer'"
         class="wbm-work-section wbm-setup-section"
         :class="{ collapsed: isSetupCollapsed, expanded: isPreviewCollapsed && !isSetupCollapsed }"
       >
@@ -206,6 +224,7 @@
       </section>
 
       <section
+        v-if="activePanel === 'optimizer'"
         class="wbm-work-section wbm-preview-shell"
         :class="{ collapsed: isPreviewCollapsed, expanded: isSetupCollapsed && !isPreviewCollapsed }"
       >
@@ -583,7 +602,11 @@
         </section>
       </section>
 
-      <div v-if="structureState.open" class="wbm-structure-modal" @click.self="closeStructureModal">
+      <div
+        v-if="activePanel === 'optimizer' && structureState.open"
+        class="wbm-structure-modal"
+        @click.self="closeStructureModal"
+      >
         <section class="wbm-structure-box" role="dialog" aria-modal="true" aria-label="世界书结构图">
           <header class="wbm-structure-head">
             <div>
@@ -712,7 +735,11 @@
         </section>
       </div>
 
-      <div v-if="ruleHelpOpen" class="wbm-confirm wbm-rule-help-modal" @click.self="closeRuleHelp">
+      <div
+        v-if="activePanel === 'optimizer' && ruleHelpOpen"
+        class="wbm-confirm wbm-rule-help-modal"
+        @click.self="closeRuleHelp"
+      >
         <div class="wbm-confirm-box wbm-rule-help-box" role="dialog" aria-modal="true" aria-label="修改规则说明">
           <header class="wbm-rule-help-head">
             <div>
@@ -743,7 +770,7 @@
         </div>
       </div>
 
-      <div v-if="customEditorState.open" class="wbm-confirm" @click.self="cancelCustomEditor">
+      <div v-if="activePanel === 'optimizer' && customEditorState.open" class="wbm-confirm" @click.self="cancelCustomEditor">
         <div class="wbm-confirm-box wbm-custom-editor-box" role="dialog" aria-modal="true" aria-label="自定义修改后">
           <header class="wbm-custom-editor-head">
             <div>
@@ -906,7 +933,7 @@
         </div>
       </div>
 
-      <div v-if="confirmState.open" class="wbm-confirm" @click.self="cancelConfirm">
+      <div v-if="activePanel === 'optimizer' && confirmState.open" class="wbm-confirm" @click.self="cancelConfirm">
         <div class="wbm-confirm-box">
           <h3>应用前提醒</h3>
           <p>
@@ -924,7 +951,11 @@
           </div>
         </div>
       </div>
-      <div v-if="blueTokenWarningState.open" class="wbm-confirm" @click.self="cancelBlueTokenWarning">
+      <div
+        v-if="activePanel === 'optimizer' && blueTokenWarningState.open"
+        class="wbm-confirm"
+        @click.self="cancelBlueTokenWarning"
+      >
         <div class="wbm-confirm-box wbm-token-warning-box" role="dialog" aria-modal="true" aria-label="蓝灯 Token 过高">
           <h3>蓝灯 Token 过高</h3>
           <p>
@@ -948,10 +979,12 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
-import { createWorldbookTutorial } from './tutorial';
+import CacheInspectorPanel from './cache-inspector/CacheInspectorPanel.vue';
+import { createCacheInspectorTutorial, createWorldbookTutorial } from './tutorial';
 
-const APP_VERSION = 'v1.1';
+const APP_VERSION = 'v2.0';
 
+type ActivePanel = 'optimizer' | 'cacheInspector';
 type PreviewStatus = 'changed' | 'unchanged' | 'filtered' | 'failed';
 type PreviewFilter = 'changed' | 'review' | 'all';
 type StructureGraphMode = 'changed' | 'all';
@@ -1254,6 +1287,7 @@ let tokenCounterPromise: Promise<TokenCounter | null> | null = null;
 let metadataRunId = 0;
 const managerRootElement = ref<HTMLElement | null>(null);
 const tutorial = createWorldbookTutorial({ root: () => managerRootElement.value });
+const cacheInspectorTutorial = createCacheInspectorTutorial({ root: () => managerRootElement.value });
 let lastTutorialStartAt = 0;
 
 const STABLE_MACROS = new Set([
@@ -1366,6 +1400,7 @@ const LEGACY_STABLE_MACROS = new Set(['user', 'bot', 'char']);
 const LEGACY_WARNING_MACROS = new Set(['group']);
 
 const isOpen = ref(false);
+const activePanel = ref<ActivePanel>('optimizer');
 const isBusy = ref(false);
 const isSetupCollapsed = ref(false);
 const isPreviewCollapsed = ref(false);
@@ -1639,7 +1674,9 @@ const structureHighlightedAfterKeys = computed(() => {
   return new Set(structureGraph.value.arrows.filter(arrow => arrow.from === source).map(arrow => arrow.to));
 });
 
+const OPEN_CACHE_INSPECTOR_EVENT = 'worldbook-manager:open-cache-inspector';
 const openManagerFromScriptButton = () => openManager();
+const openCacheInspectorFromScriptButton = () => openCacheInspector();
 
 function filterPreviewRows(rows: PreviewChange[]): PreviewChange[] {
   const includeFailed = (row: PreviewChange) => row.status === 'failed';
@@ -1851,6 +1888,7 @@ function structureAfterKey(row: PreviewChange): string | null {
 
 onMounted(() => {
   window.addEventListener('worldbook-manager:open', openManagerFromScriptButton);
+  window.addEventListener(OPEN_CACHE_INSPECTOR_EVENT, openCacheInspectorFromScriptButton);
   document.addEventListener('click', handleTutorialTriggerClick, true);
   syncVisualViewportHeight();
   window.visualViewport?.addEventListener('resize', syncVisualViewportHeight);
@@ -1860,16 +1898,20 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('worldbook-manager:open', openManagerFromScriptButton);
+  window.removeEventListener(OPEN_CACHE_INSPECTOR_EVENT, openCacheInspectorFromScriptButton);
   document.removeEventListener('click', handleTutorialTriggerClick, true);
   window.visualViewport?.removeEventListener('resize', syncVisualViewportHeight);
   window.visualViewport?.removeEventListener('scroll', syncVisualViewportHeight);
   window.removeEventListener('resize', syncVisualViewportHeight);
   tutorial.close();
+  cacheInspectorTutorial.close();
 });
 
 function openManager(): void {
   console.info('[世界书缓存优化器] 打开管理器');
+  activePanel.value = 'optimizer';
   isOpen.value = true;
+  cacheInspectorTutorial.close();
   syncVisualViewportHeight();
   applyWarningDismissed.value = readApplyWarningDismissed();
   blueTokenWarningDismissed.value = readBlueTokenWarningDismissed();
@@ -1880,10 +1922,21 @@ function openManager(): void {
   scheduleTutorialStart();
 }
 
+function openCacheInspector(): void {
+  console.info('[缓存命中对比] 打开缓存命中对比');
+  activePanel.value = 'cacheInspector';
+  isOpen.value = true;
+  syncVisualViewportHeight();
+  tutorial.close();
+  closeTransientModals();
+  scheduleTutorialStart();
+}
+
 function closeManager(): void {
-  if (isBusy.value) return;
+  if (activePanel.value === 'optimizer' && isBusy.value) return;
   isOpen.value = false;
   tutorial.close();
+  cacheInspectorTutorial.close();
   ruleHelpOpen.value = false;
   confirmState.open = false;
   blueTokenWarningState.open = false;
@@ -1902,16 +1955,25 @@ function startTutorial(): void {
   const now = Date.now();
   if (now - lastTutorialStartAt < 160) return;
   lastTutorialStartAt = now;
-  console.info('[世界书缓存优化器] 播放内置教程');
+  console.info(activePanel.value === 'cacheInspector' ? '[缓存命中对比] 播放内置教程' : '[世界书缓存优化器] 播放内置教程');
   void nextTick(() => {
-    tutorial.start({ manual: true, interrupt: true });
+    if (activePanel.value === 'cacheInspector') {
+      cacheInspectorTutorial.start({ manual: true, interrupt: true });
+    } else {
+      tutorial.start({ manual: true, interrupt: true });
+    }
   });
 }
 
 function scheduleTutorialStart(): void {
   void nextTick(() => {
     window.setTimeout(() => {
-      if (isOpen.value) tutorial.maybeStart();
+      if (!isOpen.value) return;
+      if (activePanel.value === 'cacheInspector') {
+        cacheInspectorTutorial.maybeStart();
+      } else {
+        tutorial.maybeStart();
+      }
     }, 220);
   });
 }

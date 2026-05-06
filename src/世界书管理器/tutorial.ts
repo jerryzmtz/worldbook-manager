@@ -48,7 +48,8 @@ type TutorialRect = {
   height: number;
 };
 
-const STORAGE_KEY = 'wbm_tutorial_state_v1';
+const WORLDBOOK_STORAGE_KEY = 'wbm_tutorial_state_v1';
+const CACHE_INSPECTOR_STORAGE_KEY = 'wbm_cache_inspector_tutorial_state_v1';
 const STYLE_ID = 'wbm-tutorial-style';
 const OVERLAY_CLASS = 'wbm-tutorial-overlay';
 const STATE_REVISION = 1;
@@ -60,7 +61,7 @@ const DEFAULT_STATE: TutorialState = {
   completed: false,
 };
 
-const STEPS: TutorialStep[] = [
+const WORLDBOOK_STEPS: TutorialStep[] = [
   {
     selector: '.wbm-dialog',
     title: '世界书缓存优化器',
@@ -113,6 +114,61 @@ const STEPS: TutorialStep[] = [
   },
 ];
 
+const CACHE_INSPECTOR_STEPS: TutorialStep[] = [
+  {
+    selector: '.wbm-dialog.cache-mode',
+    title: '缓存命中对比器',
+    content:
+      '这里会记录每次生成请求返回的缓存命中数据，帮助你看命中率、估算花费，并对比两次请求的提示词断点。',
+    placement: 'center',
+  },
+  {
+    selector: '[data-wbm-cache-tutorial="overview"]',
+    title: '统计概览',
+    content:
+      '顶部统计会跟随当前筛选条件变化而变化。',
+    placement: 'bottom',
+  },
+  {
+    selector: '[data-wbm-cache-tutorial="filters"]',
+    title: '筛选记录',
+    content: '可以按模型、缓存率和是否保有完整提示词来筛选。脚本默认只保留最近80条的完整提示词以供对比。',
+    placement: 'bottom',
+  },
+  {
+    selector: '[data-wbm-cache-tutorial="records"]',
+    title: '请求记录',
+    content:
+      '每条记录显示命中率、模型、提示词长度、token 和估算费用。最近80条提示词会保留完整记录以对比断点；过老的提示词记录只保留统计数据。',
+    placement: 'right',
+  },
+  {
+    selector: '[data-wbm-cache-tutorial="usage-chart"]',
+    title: '统计图',
+    content: '这里会按当前筛选条件展示最近31天的花费、缓存节省、请求次数、token 和模型汇总。',
+    placement: 'bottom',
+  },
+  {
+    selector: '[data-wbm-cache-tutorial="record-actions"]',
+    title: '选择旧/新请求',
+    content: '点击“旧”和“新”选择两次请求。选择后右侧会定位第一处可能破坏缓存的提示词差异。',
+    placement: 'left',
+  },
+  {
+    selector: '[data-wbm-cache-tutorial="diff"]',
+    title: '断点对比',
+    content:
+      '对比器默认只找第一处差异。未展开全文时，“跳到断点”会跳到摘要高亮；展开全文后会跳到全文高亮。',
+    placement: 'left',
+  },
+  {
+    selector: '[data-wbm-cache-tutorial="diff-actions"]',
+    title: '全文与断点',
+    content: '如果差异上下文不够，可以展开全文。',
+    placement: 'bottom',
+  },
+];
+
 const escapeHtml = (value: string): string =>
   value
     .replace(/&/g, '&amp;')
@@ -144,6 +200,19 @@ const isTutorialAction = (action: string | undefined): action is TutorialAction 
   action === 'prev' || action === 'next' || action === 'skip' || action === 'never';
 
 export function createWorldbookTutorial(options: WorldbookTutorialOptions = {}): WorldbookTutorial {
+  return createTutorial(options, WORLDBOOK_STEPS, WORLDBOOK_STORAGE_KEY, '世界书缓存优化器');
+}
+
+export function createCacheInspectorTutorial(options: WorldbookTutorialOptions = {}): WorldbookTutorial {
+  return createTutorial(options, CACHE_INSPECTOR_STEPS, CACHE_INSPECTOR_STORAGE_KEY, '缓存命中对比');
+}
+
+function createTutorial(
+  options: WorldbookTutorialOptions,
+  configuredSteps: TutorialStep[],
+  storageKey: string,
+  logName: string,
+): WorldbookTutorial {
   let activeTutorial: ActiveTutorial | null = null;
   let overlay: HTMLElement | null = null;
   let blocker: HTMLElement | null = null;
@@ -170,7 +239,7 @@ export function createWorldbookTutorial(options: WorldbookTutorialOptions = {}):
 
   const getState = (): TutorialState => {
     try {
-      return normalizeState(JSON.parse(getWin().localStorage.getItem(STORAGE_KEY) || 'null'));
+      return normalizeState(JSON.parse(getWin().localStorage.getItem(storageKey) || 'null'));
     } catch {
       return { ...DEFAULT_STATE };
     }
@@ -178,7 +247,7 @@ export function createWorldbookTutorial(options: WorldbookTutorialOptions = {}):
 
   const saveState = (state: TutorialState): void => {
     try {
-      getWin().localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      getWin().localStorage.setItem(storageKey, JSON.stringify(state));
     } catch {
       // localStorage can be blocked in embedded/private contexts; tutorial state is optional.
     }
@@ -704,7 +773,7 @@ export function createWorldbookTutorial(options: WorldbookTutorialOptions = {}):
 
   const collectVisibleSteps = (): TutorialStep[] => {
     const steps: TutorialStep[] = [];
-    for (const step of STEPS) {
+    for (const step of configuredSteps) {
       if (!step.selector || getSelectors(step).some(selector => queryVisibleElement(selector))) steps.push(step);
     }
     return steps;
@@ -881,7 +950,7 @@ export function createWorldbookTutorial(options: WorldbookTutorialOptions = {}):
     if (!manual && (state.disabled || state.completed)) return;
     const steps = collectVisibleSteps();
     if (steps.length === 0) {
-      console.warn('[世界书缓存优化器] 没有找到可播放的教程步骤。');
+      console.warn(`[${logName}] 没有找到可播放的教程步骤。`);
       return;
     }
 
