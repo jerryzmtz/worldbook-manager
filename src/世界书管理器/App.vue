@@ -982,7 +982,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
 import CacheInspectorPanel from './cache-inspector/CacheInspectorPanel.vue';
 import { createCacheInspectorTutorial, createWorldbookTutorial } from './tutorial';
 
-const APP_VERSION = 'v2.0';
+const APP_VERSION = 'v2.1';
 
 type ActivePanel = 'optimizer' | 'cacheInspector';
 type PreviewStatus = 'changed' | 'unchanged' | 'filtered' | 'failed';
@@ -1226,6 +1226,61 @@ type BookPlan = {
   changedCount: number;
 };
 
+type WorldbookImplicitFields = {
+  addMemo: boolean;
+  matchPersonaDescription: boolean;
+  matchCharacterDescription: boolean;
+  matchCharacterPersonality: boolean;
+  matchCharacterDepthPrompt: boolean;
+  matchScenario: boolean;
+  matchCreatorNotes: boolean;
+  group: string;
+  groupOverride: boolean;
+  groupWeight: number;
+  caseSensitive: boolean | null;
+  matchWholeWords: boolean | null;
+  useGroupScoring: boolean | null;
+  automationId: string;
+  ignoreBudget: boolean;
+  outletName: string;
+  triggers: unknown[];
+  characterFilter: {
+    isExclude: boolean;
+    names: string[];
+    tags: string[];
+  };
+};
+
+type WorldbookEntryWithImplicit = WorldbookEntry & Partial<WorldbookImplicitFields>;
+
+type OriginalWorldbookEntry = WorldbookImplicitFields & {
+  uid: number;
+  displayIndex: number;
+  comment: string;
+  disable: boolean;
+  constant: boolean;
+  selective: boolean;
+  key: string[];
+  selectiveLogic: 0 | 1 | 2 | 3;
+  keysecondary: string[];
+  scanDepth: number | null;
+  vectorized: boolean;
+  position: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  role: 0 | 1 | 2 | null;
+  depth: number;
+  order: number;
+  content: string;
+  useProbability: boolean;
+  probability: number;
+  excludeRecursion: boolean;
+  preventRecursion: boolean;
+  delayUntilRecursion: boolean | number;
+  sticky: number | null;
+  cooldown: number | null;
+  delay: number | null;
+  extra?: Record<string, unknown>;
+};
+
 type BookMetadata = {
   entryCount: number;
   enabledCount: number;
@@ -1283,6 +1338,54 @@ const APPLY_WARNING_DISMISSED_KEY = 'worldbook_manager_apply_warning_dismissed_v
 const BLUE_TOKEN_WARNING_DISMISSED_KEY = 'worldbook_manager_blue_token_warning_dismissed_v1';
 const BLUE_TOKEN_WARNING_THRESHOLD = 400_000;
 const VISUAL_VIEWPORT_CSS_VAR = '--wbm-vvh';
+const DEFAULT_WORLDBOOK_IMPLICIT_FIELDS: WorldbookImplicitFields = {
+  addMemo: true,
+  matchPersonaDescription: false,
+  matchCharacterDescription: false,
+  matchCharacterPersonality: false,
+  matchCharacterDepthPrompt: false,
+  matchScenario: false,
+  matchCreatorNotes: false,
+  group: '',
+  groupOverride: false,
+  groupWeight: 100,
+  caseSensitive: null,
+  matchWholeWords: null,
+  useGroupScoring: null,
+  automationId: '',
+  ignoreBudget: false,
+  outletName: '',
+  triggers: [],
+  characterFilter: {
+    isExclude: false,
+    names: [],
+    tags: [],
+  },
+};
+const POSITION_TO_ORIGINAL: Record<WorldbookEntry['position']['type'], OriginalWorldbookEntry['position']> = {
+  before_character_definition: 0,
+  after_character_definition: 1,
+  before_author_note: 2,
+  after_author_note: 3,
+  at_depth: 4,
+  before_example_messages: 5,
+  after_example_messages: 6,
+  outlet: 7,
+};
+const ROLE_TO_ORIGINAL: Record<WorldbookEntry['position']['role'], NonNullable<OriginalWorldbookEntry['role']>> = {
+  system: 0,
+  user: 1,
+  assistant: 2,
+};
+const SELECTIVE_LOGIC_TO_ORIGINAL: Record<
+  WorldbookEntry['strategy']['keys_secondary']['logic'],
+  OriginalWorldbookEntry['selectiveLogic']
+> = {
+  and_any: 0,
+  not_all: 1,
+  not_any: 2,
+  and_all: 3,
+};
 let tokenCounterPromise: Promise<TokenCounter | null> | null = null;
 let metadataRunId = 0;
 const managerRootElement = ref<HTMLElement | null>(null);
@@ -2654,16 +2757,13 @@ async function applyChangesDirect(): Promise<void> {
   try {
     for (const bookName of selectedBooks.value) {
       try {
-        let changedCount = 0;
-        await updateWorldbookWith(
-          bookName,
-          entries => {
-            const plan = buildBookPlan(bookName, entries, false);
-            changedCount = plan.changedCount;
-            return plan.entries;
-          },
-          { render: 'immediate' },
-        );
+        const entries = await getWorldbook(bookName);
+        const plan = buildBookPlan(bookName, entries, false);
+        const changedCount = plan.changedCount;
+        if (changedCount > 0) {
+          await saveWorldbookImmediately(bookName, plan.entries);
+          refreshWorldbookEditor(bookName);
+        }
         results.push({ worldbook: bookName, changed: changedCount, failed: false, errorMessage: null });
       } catch (error) {
         results.push({ worldbook: bookName, changed: 0, failed: true, errorMessage: formatError(error) });
@@ -2689,6 +2789,134 @@ async function applyChangesDirect(): Promise<void> {
   } finally {
     isBusy.value = false;
   }
+}
+
+async function saveWorldbookImmediately(bookName: string, entries: WorldbookEntry[]): Promise<void> {
+  const context = getSillyTavernContext();
+  if (!context || typeof context.saveWorldInfo !== 'function') {
+    throw new Error('SillyTavern 原生世界书保存接口不可用');
+  }
+
+  const originalData = await loadOriginalWorldbookData(bookName);
+  await context.saveWorldInfo(
+    bookName,
+    {
+      ...originalData,
+      entries: toOriginalWorldbookEntries(entries),
+    },
+    true,
+  );
+  await verifyWorldbookSaved(bookName, entries);
+}
+
+function getSillyTavernContext(): typeof SillyTavern | null {
+  return typeof SillyTavern === 'undefined' ? null : SillyTavern;
+}
+
+async function loadOriginalWorldbookData(bookName: string): Promise<Record<string, unknown>> {
+  const context = getSillyTavernContext();
+  if (!context || typeof context.loadWorldInfo !== 'function') return {};
+  const data = await context.loadWorldInfo(bookName);
+  return isRecord(data) ? data : {};
+}
+
+function toOriginalWorldbookEntries(entries: WorldbookEntry[]): Record<string, OriginalWorldbookEntry> {
+  return Object.fromEntries(entries.map((entry, index) => [String(entry.uid), toOriginalWorldbookEntry(entry, index)]));
+}
+
+function toOriginalWorldbookEntry(entry: WorldbookEntry, displayIndex: number): OriginalWorldbookEntry {
+  const source = entry as WorldbookEntryWithImplicit;
+  const result: OriginalWorldbookEntry = {
+    ...resolveWorldbookImplicitFields(source),
+    uid: entry.uid,
+    displayIndex,
+    comment: entry.name ?? '',
+    disable: !entry.enabled,
+    constant: entry.strategy.type === 'constant',
+    selective: entry.strategy.type === 'selective',
+    key: entry.strategy.keys.map(formatWorldbookKey),
+    selectiveLogic: SELECTIVE_LOGIC_TO_ORIGINAL[entry.strategy.keys_secondary.logic],
+    keysecondary: entry.strategy.keys_secondary.keys.map(formatWorldbookKey),
+    scanDepth: entry.strategy.scan_depth === 'same_as_global' ? null : entry.strategy.scan_depth,
+    vectorized: entry.strategy.type === 'vectorized',
+    position: POSITION_TO_ORIGINAL[entry.position.type],
+    role: ROLE_TO_ORIGINAL[entry.position.role],
+    depth: entry.position.depth,
+    order: entry.position.order,
+    content: entry.content,
+    useProbability: true,
+    probability: entry.probability,
+    excludeRecursion: entry.recursion.prevent_incoming,
+    preventRecursion: entry.recursion.prevent_outgoing,
+    delayUntilRecursion: entry.recursion.delay_until ?? false,
+    sticky: entry.effect.sticky,
+    cooldown: entry.effect.cooldown,
+    delay: entry.effect.delay,
+  };
+  if (entry.extra) {
+    result.extra = { ...entry.extra };
+  }
+  return result;
+}
+
+function resolveWorldbookImplicitFields(entry: WorldbookEntryWithImplicit): WorldbookImplicitFields {
+  return {
+    addMemo: entry.addMemo ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.addMemo,
+    matchPersonaDescription: entry.matchPersonaDescription ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.matchPersonaDescription,
+    matchCharacterDescription:
+      entry.matchCharacterDescription ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.matchCharacterDescription,
+    matchCharacterPersonality:
+      entry.matchCharacterPersonality ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.matchCharacterPersonality,
+    matchCharacterDepthPrompt:
+      entry.matchCharacterDepthPrompt ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.matchCharacterDepthPrompt,
+    matchScenario: entry.matchScenario ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.matchScenario,
+    matchCreatorNotes: entry.matchCreatorNotes ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.matchCreatorNotes,
+    group: entry.group ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.group,
+    groupOverride: entry.groupOverride ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.groupOverride,
+    groupWeight: entry.groupWeight ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.groupWeight,
+    caseSensitive: entry.caseSensitive ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.caseSensitive,
+    matchWholeWords: entry.matchWholeWords ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.matchWholeWords,
+    useGroupScoring: entry.useGroupScoring ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.useGroupScoring,
+    automationId: entry.automationId ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.automationId,
+    ignoreBudget: entry.ignoreBudget ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.ignoreBudget,
+    outletName: entry.outletName ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.outletName,
+    triggers: [...(entry.triggers ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.triggers)],
+    characterFilter: {
+      isExclude: entry.characterFilter?.isExclude ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.characterFilter.isExclude,
+      names: [...(entry.characterFilter?.names ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.characterFilter.names)],
+      tags: [...(entry.characterFilter?.tags ?? DEFAULT_WORLDBOOK_IMPLICIT_FIELDS.characterFilter.tags)],
+    },
+  };
+}
+
+function formatWorldbookKey(key: string | RegExp): string {
+  return String(key);
+}
+
+async function verifyWorldbookSaved(bookName: string, expectedEntries: WorldbookEntry[]): Promise<void> {
+  const savedEntries = await getWorldbook(bookName);
+  const isSame =
+    savedEntries.length === expectedEntries.length &&
+    savedEntries.every(
+      (entry, index) => entry.uid === expectedEntries[index].uid && sameManagedEntry(entry, expectedEntries[index]),
+    );
+  if (!isSame) {
+    throw new Error('世界书保存后复读校验失败，已阻止继续报告成功');
+  }
+}
+
+function refreshWorldbookEditor(bookName: string): void {
+  const context = getSillyTavernContext();
+  if (!context || typeof context.reloadWorldInfoEditor !== 'function') return;
+  try {
+    context.reloadWorldInfoEditor(bookName, true);
+  } catch (error) {
+    console.warn(`[世界书缓存优化器] 刷新世界书编辑器失败：${formatError(error)}`);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function readApplyWarningDismissed(): boolean {
