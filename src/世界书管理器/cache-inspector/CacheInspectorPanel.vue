@@ -1334,7 +1334,7 @@ function formatError(error: unknown): string {
 
 .wbc-record-main {
   display: grid;
-  grid-template-columns: 88px minmax(0, 1fr) minmax(82px, auto) 66px;
+  grid-template-columns: 88px minmax(0, 1fr) minmax(82px, auto) 82px;
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -1397,10 +1397,14 @@ function formatError(error: unknown): string {
   align-items: center;
   justify-content: center;
   gap: 5px;
+  box-sizing: border-box;
+  min-width: 72px;
   min-height: 28px;
+  white-space: nowrap;
 }
 
 .wbc-status .fa-spin {
+  flex: 0 0 auto;
   font-size: 11px;
 }
 
@@ -2114,6 +2118,7 @@ function formatError(error: unknown): string {
     grid-row: 2;
     align-self: start;
     justify-self: stretch;
+    min-width: 0;
     padding: 3px 5px;
     border-radius: 999px;
     font-size: 10px;
@@ -2122,7 +2127,7 @@ function formatError(error: unknown): string {
 
   .wbc-status.status-pending,
   .wbc-status.status-failed {
-    display: block;
+    display: inline-flex;
   }
 
   .wbc-record-actions {
