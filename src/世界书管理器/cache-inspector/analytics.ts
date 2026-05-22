@@ -12,8 +12,8 @@ export type CacheUsageChartBucket = {
   missTokens: number;
   outputTokens: number;
   totalTokens: number;
-  totalUsd: number;
-  savedUsd: number;
+  totalCny: number;
+  savedCny: number;
 };
 
 export type CacheUsageModelSummary = {
@@ -23,8 +23,8 @@ export type CacheUsageModelSummary = {
   missTokens: number;
   outputTokens: number;
   totalTokens: number;
-  totalUsd: number;
-  savedUsd: number;
+  totalCny: number;
+  savedCny: number;
 };
 
 export type CacheUsageChartData = {
@@ -36,8 +36,8 @@ export type CacheUsageChartData = {
   missTokens: number;
   outputTokens: number;
   totalTokens: number;
-  totalUsd: number;
-  savedUsd: number;
+  totalCny: number;
+  savedCny: number;
   pricedCount: number;
   unmatchedPriceCount: number;
   buckets: CacheUsageChartBucket[];
@@ -74,8 +74,8 @@ export function buildCacheUsageChartData(
     bucket.outputTokens += record.outputTokens;
     bucket.totalTokens += tokenTotal;
     if (cost) {
-      bucket.totalUsd += cost.totalUsd;
-      bucket.savedUsd += cost.savedUsd;
+      bucket.totalCny += cost.totalCny;
+      bucket.savedCny += cost.savedCny;
       pricedCount += 1;
     } else if (shouldCountAsUnmatchedPrice(record)) {
       unmatchedPriceCount += 1;
@@ -88,8 +88,8 @@ export function buildCacheUsageChartData(
     summary.outputTokens += record.outputTokens;
     summary.totalTokens += tokenTotal;
     if (cost) {
-      summary.totalUsd += cost.totalUsd;
-      summary.savedUsd += cost.savedUsd;
+      summary.totalCny += cost.totalCny;
+      summary.savedCny += cost.savedCny;
     }
     modelMap.set(record.model, summary);
   }
@@ -103,12 +103,12 @@ export function buildCacheUsageChartData(
     missTokens: buckets.reduce((sum, bucket) => sum + bucket.missTokens, 0),
     outputTokens: buckets.reduce((sum, bucket) => sum + bucket.outputTokens, 0),
     totalTokens: buckets.reduce((sum, bucket) => sum + bucket.totalTokens, 0),
-    totalUsd: buckets.reduce((sum, bucket) => sum + bucket.totalUsd, 0),
-    savedUsd: buckets.reduce((sum, bucket) => sum + bucket.savedUsd, 0),
+    totalCny: buckets.reduce((sum, bucket) => sum + bucket.totalCny, 0),
+    savedCny: buckets.reduce((sum, bucket) => sum + bucket.savedCny, 0),
     pricedCount,
     unmatchedPriceCount,
     buckets,
-    modelSummaries: Array.from(modelMap.values()).sort((left, right) => right.totalUsd - left.totalUsd),
+    modelSummaries: Array.from(modelMap.values()).sort((left, right) => right.totalCny - left.totalCny),
   };
 }
 
@@ -124,8 +124,8 @@ function createBuckets(startTimestamp: number, dayCount: number): CacheUsageChar
       missTokens: 0,
       outputTokens: 0,
       totalTokens: 0,
-      totalUsd: 0,
-      savedUsd: 0,
+      totalCny: 0,
+      savedCny: 0,
     };
   });
 }
@@ -138,8 +138,8 @@ function createModelSummary(model: string): CacheUsageModelSummary {
     missTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
-    totalUsd: 0,
-    savedUsd: 0,
+    totalCny: 0,
+    savedCny: 0,
   };
 }
 

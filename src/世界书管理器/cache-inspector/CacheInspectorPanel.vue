@@ -23,12 +23,12 @@
       </article>
       <article class="wbc-metric">
         <span>预计花费</span>
-        <strong>{{ formatUsd(visibleStats.totalUsd) }}</strong>
+        <strong>{{ formatCny(visibleStats.totalCny) }}</strong>
         <small>{{ priceCoverageLabel }}</small>
       </article>
       <article class="wbc-metric tone-high">
         <span>预计缓存节省</span>
-        <strong>{{ formatUsd(visibleStats.savedUsd) }}</strong>
+        <strong>{{ formatCny(visibleStats.savedCny) }}</strong>
         <small>按命中 token 估算</small>
       </article>
     </div>
@@ -74,7 +74,6 @@
         <header class="wbc-section-head">
           <h3>请求记录</h3>
           <div class="wbc-record-header-actions">
-            <span class="wbc-selected-label">{{ selectedLabel }}</span>
             <button
               class="wbm-small-btn"
               type="button"
@@ -104,6 +103,7 @@
               'is-before': record.id === selectedBeforeId,
               'is-after': record.id === selectedAfterId,
               'is-stats-only': !record.snapshotAvailable,
+              'is-pending': record.status === 'pending',
             }"
           >
             <button class="wbc-record-main" type="button" @click="selectRecord(record)">
@@ -117,7 +117,10 @@
                 </small>
               </span>
               <span class="wbc-cost" :title="priceTooltip(record)">{{ recordCostLabel(record) }}</span>
-              <span class="wbc-status" :class="`status-${record.status}`">{{ statusLabel(record) }}</span>
+              <span class="wbc-status" :class="`status-${record.status}`">
+                <i v-if="record.status === 'pending'" class="fa-solid fa-circle-notch fa-spin" aria-hidden="true"></i>
+                {{ statusLabel(record) }}
+              </span>
             </button>
             <div class="wbc-record-actions" data-wbm-cache-tutorial="record-actions">
               <button
@@ -189,7 +192,7 @@
           <div class="wbc-diff-summary" :class="`kind-${diffResult.kind}`">
             <strong>{{ diffResult.summary }}</strong>
             <span v-if="diffResult.index !== null">
-              #{{ diffResult.index + 1 }} · {{ diffResult.beforeRole || '-' }} → {{ diffResult.afterRole || '-' }}
+              {{ diffIndexLabel }} · {{ diffResult.beforeRole || '-' }} → {{ diffResult.afterRole || '-' }}
             </span>
           </div>
 
@@ -249,12 +252,12 @@
           </article>
           <article>
             <span>预计花费</span>
-            <strong>{{ formatUsd(usageChartData.totalUsd) }}</strong>
+            <strong>{{ formatCny(usageChartData.totalCny) }}</strong>
             <small>{{ usageChartPriceLabel }}</small>
           </article>
           <article class="tone-high">
             <span>预计缓存节省</span>
-            <strong>{{ formatUsd(usageChartData.savedUsd) }}</strong>
+            <strong>{{ formatCny(usageChartData.savedCny) }}</strong>
             <small>按命中 token 估算</small>
           </article>
           <article>
@@ -273,7 +276,7 @@
             <article class="wbc-chart-card">
               <header>
                 <h4>每日花费</h4>
-                <span>{{ formatUsd(usageChartData.totalUsd) }}</span>
+                <span>{{ formatCny(usageChartData.totalCny) }}</span>
               </header>
               <svg class="wbc-chart-svg" :viewBox="`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`" role="img" aria-label="每日花费柱状图">
                 <line class="wbc-axis-line" :x1="CHART_LEFT" :x2="CHART_RIGHT" :y1="CHART_BASELINE" :y2="CHART_BASELINE" />
@@ -299,7 +302,7 @@
             <article class="wbc-chart-card">
               <header>
                 <h4>每日节省</h4>
-                <span>{{ formatUsd(usageChartData.savedUsd) }}</span>
+                <span>{{ formatCny(usageChartData.savedCny) }}</span>
               </header>
               <svg class="wbc-chart-svg" :viewBox="`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`" role="img" aria-label="每日缓存节省柱状图">
                 <line class="wbc-axis-line" :x1="CHART_LEFT" :x2="CHART_RIGHT" :y1="CHART_BASELINE" :y2="CHART_BASELINE" />
@@ -386,7 +389,7 @@
                 <strong>{{ model.model }}</strong>
                 <span>{{ formatNumber(model.requestCount) }} 次</span>
                 <span>{{ formatCompactNumber(model.totalTokens) }} tokens</span>
-                <span>{{ formatUsd(model.totalUsd) }}</span>
+                <span>{{ formatCny(model.totalCny) }}</span>
               </article>
             </div>
           </section>
@@ -417,6 +420,7 @@ import {
   type CacheUsageChartBucket,
   type CacheUsageModelSummary,
 } from './analytics';
+import { EXCHANGE_RATE_UPDATED_EVENT, refreshUsdToCnyRate } from './exchange-rate';
 import {
   buildFullTextSegments,
   CACHE_RECORDS_CHANGED_EVENT,
@@ -476,6 +480,7 @@ const clearConfirmOpen = ref(false);
 const usageChartOpen = ref(false);
 const selectedBeforeId = ref<string | null>(null);
 const selectedAfterId = ref<string | null>(null);
+const exchangeRateVersion = ref(0);
 const filters = reactive<CacheRecordFilterState>({
   model: ALL_MODELS,
   cacheRate: 'all',
@@ -495,9 +500,10 @@ const modelOptions = computed(() => {
   return Array.from(models).sort((left, right) => left.localeCompare(right));
 });
 const visibleRecords = computed(() => records.value.filter(record => matchesFilters(record)));
-const visibleStats = computed<CacheVisibleStats>(() => buildVisibleStats(visibleRecords.value));
-const selectedBeforeSummary = computed(() => records.value.find(record => record.id === selectedBeforeId.value) ?? null);
-const selectedAfterSummary = computed(() => records.value.find(record => record.id === selectedAfterId.value) ?? null);
+const visibleStats = computed<CacheVisibleStats>(() => {
+  void exchangeRateVersion.value;
+  return buildVisibleStats(visibleRecords.value);
+});
 const selectedBeforeSnapshot = computed(() =>
   selectedBeforeId.value ? snapshotCache.get(selectedBeforeId.value) ?? null : null,
 );
@@ -510,16 +516,14 @@ const isDiffLoading = computed(
     (selectedAfterId.value ? snapshotLoadingIds.has(selectedAfterId.value) : false),
 );
 const diffResult = computed(() => comparePromptRecords(selectedBeforeSnapshot.value, selectedAfterSnapshot.value));
-const selectedLabel = computed(() => {
-  const before = selectedBeforeSummary.value ? '旧请求已选' : '旧请求未选';
-  const after = selectedAfterSummary.value ? '新请求已选' : '新请求未选';
-  return `${before} · ${after}`;
-});
 const canShowFullText = computed(
-  () => diffResult.value.index !== null && !!selectedBeforeSnapshot.value && !!selectedAfterSnapshot.value,
+  () =>
+    (diffResult.value.beforeIndex !== null || diffResult.value.afterIndex !== null) &&
+    !!selectedBeforeSnapshot.value &&
+    !!selectedAfterSnapshot.value,
 );
-const beforeFullText = computed(() => fullMessageText(selectedBeforeSnapshot.value, diffResult.value.index));
-const afterFullText = computed(() => fullMessageText(selectedAfterSnapshot.value, diffResult.value.index));
+const beforeFullText = computed(() => fullMessageText(selectedBeforeSnapshot.value, diffResult.value.beforeIndex));
+const afterFullText = computed(() => fullMessageText(selectedAfterSnapshot.value, diffResult.value.afterIndex));
 const beforeFullSegments = computed(() =>
   buildFullTextSegments(
     beforeFullText.value,
@@ -537,12 +541,25 @@ const truncatedBeforeChange = computed(() =>
 const truncatedAfterChange = computed(() =>
   changedTextLabel(diffResult.value.context?.afterChanged ?? '', diffResult.value.context?.afterChangedLength ?? 0),
 );
+const diffIndexLabel = computed(() => {
+  const beforeIndex = diffResult.value.beforeIndex;
+  const afterIndex = diffResult.value.afterIndex;
+  if (beforeIndex !== null && afterIndex !== null) {
+    return beforeIndex === afterIndex ? `#${beforeIndex + 1}` : `#${beforeIndex + 1} → #${afterIndex + 1}`;
+  }
+  if (beforeIndex !== null) return `#${beforeIndex + 1} → -`;
+  if (afterIndex !== null) return `- → #${afterIndex + 1}`;
+  return diffResult.value.index === null ? '' : `#${diffResult.value.index + 1}`;
+});
 const priceCoverageLabel = computed(() => {
   if (visibleStats.value.count === 0) return '无筛选结果';
   if (visibleStats.value.unmatchedPriceCount === 0) return `${formatNumber(visibleStats.value.pricedCount)} 条已匹配`;
   return `${formatNumber(visibleStats.value.pricedCount)} 条已匹配 · ${formatNumber(visibleStats.value.unmatchedPriceCount)} 条未匹配`;
 });
-const usageChartData = computed(() => buildCacheUsageChartData(visibleRecords.value));
+const usageChartData = computed(() => {
+  void exchangeRateVersion.value;
+  return buildCacheUsageChartData(visibleRecords.value);
+});
 const usageChartScopeLabel = computed(() => buildUsageChartScopeLabel());
 const usageChartPriceLabel = computed(() => {
   if (usageChartData.value.requestCount === 0) return '无统计记录';
@@ -550,10 +567,10 @@ const usageChartPriceLabel = computed(() => {
   return `${formatNumber(usageChartData.value.pricedCount)} 条已匹配 · ${formatNumber(usageChartData.value.unmatchedPriceCount)} 条未匹配`;
 });
 const spendBars = computed(() =>
-  buildBarMarks(usageChartData.value.buckets, bucket => bucket.totalUsd, 'wbc-bar-cost', formatUsd),
+  buildBarMarks(usageChartData.value.buckets, bucket => bucket.totalCny, 'wbc-bar-cost', formatCny),
 );
 const savingBars = computed(() =>
-  buildBarMarks(usageChartData.value.buckets, bucket => bucket.savedUsd, 'wbc-bar-saving', formatUsd),
+  buildBarMarks(usageChartData.value.buckets, bucket => bucket.savedCny, 'wbc-bar-saving', formatCny),
 );
 const tokenStackBars = computed(() => buildTokenStackBars(usageChartData.value.buckets));
 const requestLine = computed(() => buildLineMarks(usageChartData.value.buckets, bucket => bucket.requestCount));
@@ -562,7 +579,9 @@ const requestAreaPath = computed(() => areaPath(requestLine.value.points));
 
 onMounted(() => {
   void refreshRecords();
+  void refreshUsdToCnyRate();
   window.addEventListener(CACHE_RECORDS_CHANGED_EVENT, handleRecordsChanged as EventListener);
+  window.addEventListener(EXCHANGE_RATE_UPDATED_EVENT, handleExchangeRateUpdated as EventListener);
   window.visualViewport?.addEventListener('resize', handleCacheModalViewportChange);
   window.visualViewport?.addEventListener('scroll', handleCacheModalViewportChange);
   window.addEventListener('resize', handleCacheModalViewportChange);
@@ -570,6 +589,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener(CACHE_RECORDS_CHANGED_EVENT, handleRecordsChanged as EventListener);
+  window.removeEventListener(EXCHANGE_RATE_UPDATED_EVENT, handleExchangeRateUpdated as EventListener);
   window.visualViewport?.removeEventListener('resize', handleCacheModalViewportChange);
   window.visualViewport?.removeEventListener('scroll', handleCacheModalViewportChange);
   window.removeEventListener('resize', handleCacheModalViewportChange);
@@ -637,8 +657,29 @@ async function confirmClearRecords(): Promise<void> {
   }
 }
 
-function handleRecordsChanged(_event: CacheRecordsChangedEvent): void {
+function upsertRecord(summary: CacheSummaryRecord): void {
+  const existingIndex = records.value.findIndex(record => record.id === summary.id);
+  const nextRecord = { ...summary };
+  if (existingIndex >= 0) {
+    const nextRecords = records.value.slice();
+    nextRecords[existingIndex] = nextRecord;
+    records.value = nextRecords.sort((left, right) => right.timestamp - left.timestamp);
+  } else {
+    records.value = [nextRecord, ...records.value].sort((left, right) => right.timestamp - left.timestamp);
+  }
+  pruneSelection();
+}
+
+function handleRecordsChanged(event: CacheRecordsChangedEvent): void {
+  if (event.detail?.summary) {
+    upsertRecord(event.detail.summary);
+    return;
+  }
   void refreshRecords();
+}
+
+function handleExchangeRateUpdated(): void {
+  exchangeRateVersion.value += 1;
 }
 
 function handleCacheModalViewportChange(): void {
@@ -698,9 +739,10 @@ function getCacheModalElements(): HTMLElement[] {
 
 function matchesFilters(record: CacheSummaryRecord): boolean {
   if (filters.model !== ALL_MODELS && record.model !== filters.model) return false;
-  if (!matchesCacheRateFilter(record)) return false;
   if (filters.diffability === 'diffable' && !record.snapshotAvailable) return false;
   if (filters.diffability === 'stats_only' && record.snapshotAvailable) return false;
+  if (record.status === 'pending') return true;
+  if (!matchesCacheRateFilter(record)) return false;
   return true;
 }
 
@@ -728,8 +770,8 @@ function buildVisibleStats(items: CacheSummaryRecord[]): CacheVisibleStats {
     missTokens,
     outputTokens: items.reduce((sum, record) => sum + record.outputTokens, 0),
     weightedHitRate: hitTokens + missTokens > 0 ? hitTokens / (hitTokens + missTokens) : null,
-    totalUsd: pricedItems.reduce((sum, costSnapshot) => sum + costSnapshot.totalUsd, 0),
-    savedUsd: pricedItems.reduce((sum, costSnapshot) => sum + costSnapshot.savedUsd, 0),
+    totalCny: pricedItems.reduce((sum, costSnapshot) => sum + costSnapshot.totalCny, 0),
+    savedCny: pricedItems.reduce((sum, costSnapshot) => sum + costSnapshot.savedCny, 0),
     pricedCount: pricedItems.length,
     unmatchedPriceCount,
   };
@@ -1047,7 +1089,7 @@ function formatTokenLine(record: CacheSummaryRecord): string {
 function recordCostLabel(record: CacheSummaryRecord): string {
   if (record.status === 'pending') return '待完成';
   const costSnapshot = priceForRecord(record).costSnapshot;
-  if (costSnapshot) return formatUsd(costSnapshot.totalUsd);
+  if (costSnapshot) return formatCny(costSnapshot.totalCny);
   if (record.totalCacheTokens + record.outputTokens === 0) return '无 usage';
   return '费率未匹配';
 }
@@ -1055,17 +1097,18 @@ function recordCostLabel(record: CacheSummaryRecord): string {
 function priceTooltip(record: CacheSummaryRecord): string {
   const pricingSnapshot = priceForRecord(record).pricingSnapshot;
   if (!pricingSnapshot) return '当前模型没有匹配到内置费率规则';
-  return `${pricingSnapshot.label} · ${pricingSnapshot.sourceDate}`;
+  return `${pricingSnapshot.label} · ${pricingSnapshot.sourceDate} · 按 1 USD = ${pricingSnapshot.usdToCnyRate.toFixed(4)} RMB`;
 }
 
 function priceForRecord(record: CacheSummaryRecord): ReturnType<typeof estimateCacheCost> {
+  void exchangeRateVersion.value;
   return estimateCacheCost(record.model, record);
 }
 
-function formatUsd(value: number): string {
-  if (!Number.isFinite(value)) return '$0.000000';
-  if (value >= 1) return `$${value.toFixed(2)}`;
-  return `$${value.toFixed(6)}`;
+function formatCny(value: number): string {
+  if (!Number.isFinite(value)) return '¥0.000000';
+  if (value >= 1) return `¥${value.toFixed(2)}`;
+  return `¥${value.toFixed(6)}`;
 }
 
 function formatNumber(value: number): string {
@@ -1126,6 +1169,13 @@ function formatError(error: unknown): string {
   padding: 11px 12px;
 }
 
+.wbc-metric span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .wbc-metric span,
 .wbc-metric small,
 .wbc-section-head span,
@@ -1136,7 +1186,9 @@ function formatError(error: unknown): string {
 
 .wbc-metric strong {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 21px;
   line-height: 1.12;
 }
@@ -1150,24 +1202,35 @@ function formatError(error: unknown): string {
 
 .wbc-toolbar {
   display: flex;
-  align-items: end;
+  align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  min-height: 46px;
 }
 
 .wbc-field {
-  display: grid;
-  gap: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   min-width: 150px;
   color: var(--wbm-muted);
   font-size: 12px;
   font-weight: 800;
+  white-space: nowrap;
+}
+
+.wbc-field span {
+  display: inline-flex;
+  align-items: center;
+  align-self: stretch;
+  line-height: 1;
 }
 
 .wbc-field select,
 .wbc-field input {
   box-sizing: border-box;
   height: 34px;
+  width: 150px;
   min-width: 0;
   border: 1px solid var(--wbm-border);
   border-radius: var(--wbm-radius-md);
@@ -1178,8 +1241,11 @@ function formatError(error: unknown): string {
 }
 
 .wbc-field-number {
-  width: 96px;
-  min-width: 96px;
+  min-width: 124px;
+}
+
+.wbc-field-number input {
+  width: 72px;
 }
 
 .wbc-layout {
@@ -1211,19 +1277,18 @@ function formatError(error: unknown): string {
   margin: 0;
 }
 
+.wbc-section-head h3 {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .wbc-record-header-actions {
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
+  flex: 1 1 auto;
   gap: 8px;
   min-width: 0;
-}
-
-.wbc-selected-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .wbc-head-actions {
@@ -1257,6 +1322,14 @@ function formatError(error: unknown): string {
 
 .wbc-record.is-stats-only {
   background: rgba(255, 255, 255, 0.018);
+}
+
+.wbc-record.is-pending {
+  background:
+    linear-gradient(90deg, rgba(77, 107, 254, 0), rgba(77, 107, 254, 0.07), rgba(77, 107, 254, 0))
+      0 0 / 220% 100%,
+    rgba(77, 107, 254, 0.028);
+  animation: wbc-pending-sweep 1.4s ease-in-out infinite;
 }
 
 .wbc-record-main {
@@ -1319,6 +1392,18 @@ function formatError(error: unknown): string {
   font-size: 12px;
 }
 
+.wbc-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 28px;
+}
+
+.wbc-status .fa-spin {
+  font-size: 11px;
+}
+
 .wbc-status.status-failed {
   border-color: rgba(248, 113, 113, 0.52);
   color: #fecaca;
@@ -1329,6 +1414,16 @@ function formatError(error: unknown): string {
   border-color: rgba(95, 130, 255, 0.52);
   color: #dbe5ff;
   background: var(--wbm-blue-soft);
+}
+
+@keyframes wbc-pending-sweep {
+  0% {
+    background-position: 110% 0, 0 0;
+  }
+
+  100% {
+    background-position: -110% 0, 0 0;
+  }
 }
 
 .wbc-record-actions {
@@ -1509,8 +1604,10 @@ function formatError(error: unknown): string {
   gap: 6px;
   color: var(--wbm-text);
   cursor: pointer;
+  flex: 0 0 auto;
   background: var(--wbm-surface-raised);
   line-height: 1.3;
+  white-space: nowrap;
 }
 
 .wbm-danger-btn {
@@ -1890,6 +1987,8 @@ function formatError(error: unknown): string {
 
   .wbc-field,
   .wbc-field-number {
+    display: grid;
+    gap: 3px;
     width: auto;
     min-width: 0;
     font-size: 11px;
@@ -1897,6 +1996,7 @@ function formatError(error: unknown): string {
 
   .wbc-field select,
   .wbc-field input {
+    width: 100%;
     height: 32px;
     padding: 0 9px;
     border-radius: 12px;
@@ -1919,10 +2019,6 @@ function formatError(error: unknown): string {
 
   .wbc-record-header-actions {
     gap: 6px;
-  }
-
-  .wbc-selected-label {
-    display: none;
   }
 
   .wbc-record-header-actions .wbm-small-btn,

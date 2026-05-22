@@ -280,7 +280,7 @@
               结构图
             </button>
             <label class="wbm-compact-field">
-              过滤
+              <span class="wbm-compact-label">过滤</span>
               <select v-model="previewFilter" class="wbm-select" :disabled="isBusy">
                 <option value="all">全部</option>
                 <option value="changed">建议修改</option>
@@ -288,7 +288,7 @@
               </select>
             </label>
             <label class="wbm-compact-field">
-              排序
+              <span class="wbm-compact-label">排序</span>
               <select v-model="previewSortMode" class="wbm-select" :disabled="isBusy">
                 <option value="custom">自定义</option>
                 <option value="title_asc">标题 A 到 Z</option>
@@ -982,7 +982,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
 import CacheInspectorPanel from './cache-inspector/CacheInspectorPanel.vue';
 import { createCacheInspectorTutorial, createWorldbookTutorial } from './tutorial';
 
-const APP_VERSION = 'v2.1';
+const APP_VERSION = 'v2.3';
 
 type ActivePanel = 'optimizer' | 'cacheInspector';
 type PreviewStatus = 'changed' | 'unchanged' | 'filtered' | 'failed';
@@ -5231,7 +5231,47 @@ select:disabled {
 }
 
 .wbm-preview-actions {
-  margin-bottom: 10px;
+  align-items: center;
+  min-height: 58px;
+  margin-bottom: 8px;
+}
+
+.wbm-preview-actions > .wbm-primary-btn,
+.wbm-preview-actions > .wbm-small-btn,
+.wbm-preview-actions .wbm-select {
+  min-height: 42px;
+}
+
+.wbm-preview-actions > label.wbm-compact-field {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  height: 42px;
+  min-height: 42px;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.wbm-preview-actions > label.wbm-compact-field > .wbm-compact-label {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  height: 42px;
+  padding-top: 1px;
+  box-sizing: border-box;
+  line-height: 42px;
+}
+
+.wbm-preview-actions .wbm-compact-field .wbm-select {
+  width: 158px;
+}
+
+.wbm-preview-actions .wbm-compact-field:nth-of-type(2) .wbm-select {
+  width: 206px;
 }
 
 .wbm-filter-stats {

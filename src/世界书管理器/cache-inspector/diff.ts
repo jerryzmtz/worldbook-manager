@@ -10,6 +10,10 @@ import type {
 const DEFAULT_CONTEXT_SIZE = 800;
 
 type PromptComparable = Pick<PromptSnapshotRecord, 'messages'>;
+type IndexedPromptMessage = {
+  index: number;
+  message: PromptMessageSnapshot;
+};
 
 export function createTextHash(text: string): string {
   let hash = 2166136261;
@@ -29,24 +33,32 @@ export function comparePromptRecords(
     return emptyDiff('请选择两条可对比记录。');
   }
 
-  const maxLength = Math.max(before.messages.length, after.messages.length);
+  const beforeMessages = comparableMessages(before.messages);
+  const afterMessages = comparableMessages(after.messages);
+  const hasOnlyPlaceholderChanges =
+    beforeMessages.length !== before.messages.length || afterMessages.length !== after.messages.length;
+  const maxLength = Math.max(beforeMessages.length, afterMessages.length);
   for (let index = 0; index < maxLength; index += 1) {
-    const beforeMessage = before.messages[index];
-    const afterMessage = after.messages[index];
+    const beforeItem = beforeMessages[index];
+    const afterItem = afterMessages[index];
+    const beforeMessage = beforeItem?.message;
+    const afterMessage = afterItem?.message;
 
     if (!beforeMessage && afterMessage) {
-      return buildMessageAddedDiff(index, afterMessage, contextSize);
+      return buildMessageAddedDiff(afterItem.index, afterMessage, contextSize);
     }
     if (beforeMessage && !afterMessage) {
-      return buildMessageRemovedDiff(index, beforeMessage, contextSize);
+      return buildMessageRemovedDiff(beforeItem.index, beforeMessage, contextSize);
     }
     if (!beforeMessage || !afterMessage) continue;
 
     if (beforeMessage.role !== afterMessage.role) {
       return {
         kind: 'role_changed',
-        summary: `第 ${index + 1} 条消息的身份从 ${beforeMessage.role} 变为 ${afterMessage.role}。`,
-        index,
+        summary: `第 ${afterItem.index + 1} 条有效消息的身份从 ${beforeMessage.role} 变为 ${afterMessage.role}。`,
+        index: afterItem.index,
+        beforeIndex: beforeItem.index,
+        afterIndex: afterItem.index,
         beforeRole: beforeMessage.role,
         afterRole: afterMessage.role,
         beforeLength: beforeMessage.length,
@@ -58,8 +70,10 @@ export function comparePromptRecords(
     if (beforeMessage.hash !== afterMessage.hash || beforeMessage.text !== afterMessage.text) {
       return {
         kind: 'content_changed',
-        summary: `第 ${index + 1} 条 ${afterMessage.role} 消息内容发生变化。`,
-        index,
+        summary: `第 ${afterItem.index + 1} 条有效 ${afterMessage.role} 消息内容发生变化。`,
+        index: afterItem.index,
+        beforeIndex: beforeItem.index,
+        afterIndex: afterItem.index,
         beforeRole: beforeMessage.role,
         afterRole: afterMessage.role,
         beforeLength: beforeMessage.length,
@@ -71,14 +85,24 @@ export function comparePromptRecords(
 
   return {
     kind: 'same',
-    summary: '两次请求的 messages 完全一致。',
+    summary: hasOnlyPlaceholderChanges
+      ? '两次请求的有效提示词文本一致，仅空消息占位不同。'
+      : '两次请求的 messages 完全一致。',
     index: null,
+    beforeIndex: null,
+    afterIndex: null,
     beforeRole: null,
     afterRole: null,
     beforeLength: before.messages.reduce((sum, message) => sum + message.length, 0),
     afterLength: after.messages.reduce((sum, message) => sum + message.length, 0),
     context: null,
   };
+}
+
+function comparableMessages(messages: PromptMessageSnapshot[]): IndexedPromptMessage[] {
+  return messages
+    .map((message, index) => ({ index, message }))
+    .filter(({ message }) => message.text.trim().length > 0);
 }
 
 export function buildFullTextSegments(
@@ -128,8 +152,10 @@ function buildMessageAddedDiff(
 ): PromptDiffResult {
   return {
     kind: 'message_added',
-    summary: `第 ${index + 1} 条 ${message.role} 消息是新增消息。`,
+    summary: `第 ${index + 1} 条有效 ${message.role} 消息是新增消息。`,
     index,
+    beforeIndex: null,
+    afterIndex: index,
     beforeRole: null,
     afterRole: message.role,
     beforeLength: 0,
@@ -145,8 +171,10 @@ function buildMessageRemovedDiff(
 ): PromptDiffResult {
   return {
     kind: 'message_removed',
-    summary: `第 ${index + 1} 条 ${message.role} 消息在后一次请求中消失。`,
+    summary: `第 ${index + 1} 条有效 ${message.role} 消息在后一次请求中消失。`,
     index,
+    beforeIndex: index,
+    afterIndex: null,
     beforeRole: message.role,
     afterRole: null,
     beforeLength: message.length,
@@ -215,6 +243,8 @@ function emptyDiff(summary: string): PromptDiffResult {
     kind: 'same',
     summary,
     index: null,
+    beforeIndex: null,
+    afterIndex: null,
     beforeRole: null,
     afterRole: null,
     beforeLength: 0,

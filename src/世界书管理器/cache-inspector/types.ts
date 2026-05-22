@@ -23,6 +23,8 @@ export type PricingSnapshot = {
   label: string;
   sourceUrl: string;
   sourceDate: string;
+  currency: 'CNY';
+  usdToCnyRate: number;
   inputHitUsdPerMillion: number;
   inputMissUsdPerMillion: number;
   outputUsdPerMillion: number;
@@ -30,12 +32,12 @@ export type PricingSnapshot = {
 };
 
 export type CacheCostSnapshot = {
-  currency: 'USD';
-  inputHitUsd: number;
-  inputMissUsd: number;
-  outputUsd: number;
-  totalUsd: number;
-  savedUsd: number;
+  currency: 'CNY';
+  inputHitCny: number;
+  inputMissCny: number;
+  outputCny: number;
+  totalCny: number;
+  savedCny: number;
 };
 
 export type CacheSummaryRecord = CacheUsageSnapshot & {
@@ -95,6 +97,8 @@ export type PromptDiffResult = {
   kind: PromptDiffKind;
   summary: string;
   index: number | null;
+  beforeIndex: number | null;
+  afterIndex: number | null;
   beforeRole: string | null;
   afterRole: string | null;
   beforeLength: number;
@@ -102,7 +106,7 @@ export type PromptDiffResult = {
   context: PromptDiffContext | null;
 };
 
-export type CacheRecordsChangedEvent = CustomEvent<{ recordId?: string }>;
+export type CacheRecordsChangedEvent = CustomEvent<{ recordId?: string; summary?: CacheSummaryRecord }>;
 
 export type CacheRateFilter = 'all' | 'has_usage' | 'gt_zero' | 'gte_30' | 'gte_60' | 'custom';
 
@@ -122,8 +126,8 @@ export type CacheVisibleStats = {
   missTokens: number;
   outputTokens: number;
   weightedHitRate: number | null;
-  totalUsd: number;
-  savedUsd: number;
+  totalCny: number;
+  savedCny: number;
   pricedCount: number;
   unmatchedPriceCount: number;
 };

@@ -5,8 +5,9 @@ const DB_VERSION = 2;
 const LEGACY_RECORD_STORE = 'records';
 const SUMMARY_STORE = 'summaryRecords';
 const SNAPSHOT_STORE = 'promptSnapshots';
-const MAX_SUMMARY_RECORDS = 1000;
-const MAX_PROMPT_SNAPSHOTS = 80;
+const MAX_SUMMARY_RECORDS = 10000;
+const MAX_PROMPT_SNAPSHOTS = 500;
+const MAX_PROMPT_SNAPSHOT_BYTES = 128 * 1024 * 1024;
 
 type StoreMap = {
   summary: IDBObjectStore;
@@ -232,7 +233,14 @@ async function pruneOldRecords(): Promise<void> {
     '读取缓存提示词快照失败',
   );
   const sortedSnapshots = snapshots.sort((left, right) => right.timestamp - left.timestamp);
-  const staleSnapshots = sortedSnapshots.filter((snapshot, index) => index >= MAX_PROMPT_SNAPSHOTS || staleSummaryIds.has(snapshot.id));
+  let retainedSnapshotBytes = 0;
+  const staleSnapshots = sortedSnapshots.filter((snapshot, index) => {
+    if (index >= MAX_PROMPT_SNAPSHOTS || staleSummaryIds.has(snapshot.id)) return true;
+    const snapshotBytes = estimatePromptSnapshotBytes(snapshot);
+    if (retainedSnapshotBytes + snapshotBytes > MAX_PROMPT_SNAPSHOT_BYTES) return true;
+    retainedSnapshotBytes += snapshotBytes;
+    return false;
+  });
 
   if (staleSummaries.length === 0 && staleSnapshots.length === 0) return;
 
@@ -252,4 +260,10 @@ async function pruneOldRecords(): Promise<void> {
       }
     });
   });
+}
+
+function estimatePromptSnapshotBytes(snapshot: PromptSnapshotRecord): number {
+  return snapshot.messages.reduce((sum, message) => {
+    return sum + 512 + message.role.length * 2 + message.hash.length * 2 + message.text.length * 4;
+  }, 512 + snapshot.id.length * 2);
 }

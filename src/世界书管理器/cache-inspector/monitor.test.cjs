@@ -1,0 +1,914 @@
+const assert = require('node:assert/strict');
+const { test } = require('node:test');
+
+process.env.TS_NODE_COMPILER_OPTIONS = JSON.stringify({
+  module: 'CommonJS',
+  moduleResolution: 'Node',
+});
+require('ts-node/register/transpile-only');
+
+const { CACHE_RECORDS_CHANGED_EVENT, installCacheInspectorMonitor } = require('./monitor.ts');
+
+const TARGET_API = '/api/backends/chat-completions/generate';
+let originalFetch;
+
+test('captures normal SillyTavern fetch requests', async () => {
+  let resolveFetch;
+  const routeResponse = new Promise(resolve => {
+    resolveFetch = resolve;
+  });
+  const { stores } = installTestEnvironment(async () => {
+    return routeResponse;
+  });
+  const changedEvents = [];
+  window.dispatchEvent = event => {
+    if (event.type === CACHE_RECORDS_CHANGED_EVENT) changedEvents.push(event.detail);
+    return true;
+  };
+  const completedRouteResponse = () =>
+    new Response(JSON.stringify({
+      usage: {
+        prompt_tokens_details: { cached_tokens: 7 },
+        prompt_tokens: 20,
+        completion_tokens: 5,
+        total_tokens: 25,
+      },
+    }));
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    const fetchPromise = window.fetch(TARGET_API, {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'test-model',
+        messages: [{ role: 'user', content: 'hello cache' }],
+      }),
+    });
+    await flushAsyncWork();
+
+    assert.equal(changedEvents[0]?.summary?.status, 'pending');
+    assert.equal(changedEvents[0]?.summary?.model, 'test-model');
+    assert.equal(stores.summaryRecords.size, 1);
+    const [pendingSummary] = stores.summaryRecords.values();
+    assert.equal(pendingSummary.status, 'pending');
+    assert.equal(pendingSummary.model, 'test-model');
+    const pendingId = pendingSummary.id;
+    resolveFetch(completedRouteResponse());
+    await fetchPromise;
+    await flushAsyncWork();
+
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.id, pendingId);
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'test-model');
+    assert.equal(summary.messageCount, 1);
+    assert.equal(summary.hitTokens, 7);
+    assert.equal(summary.totalTokens, 25);
+    assert.ok(changedEvents.some(event => event.summary?.status === 'completed' && event.summary.id === pendingId));
+    assert.equal(stores.promptSnapshots.size, 1);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('broadcasts pending record changes to same-origin parent windows', async () => {
+  let resolveFetch;
+  const routeResponse = new Promise(resolve => {
+    resolveFetch = resolve;
+  });
+  installTestEnvironment(async () => routeResponse);
+  const parentEvents = [];
+  const parentWindow = {
+    fetch: async () => new Response('{}'),
+    location: { href: 'http://localhost/' },
+    dispatchEvent: event => {
+      if (event.type === CACHE_RECORDS_CHANGED_EVENT) parentEvents.push(event.detail);
+      return true;
+    },
+    CustomEvent,
+  };
+  window.parent = parentWindow;
+  window.top = parentWindow;
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    const fetchPromise = window.fetch(TARGET_API, {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'parent-event-model',
+        messages: [{ role: 'user', content: 'same origin parent event' }],
+      }),
+    });
+    await flushAsyncWork();
+
+    assert.equal(parentEvents[0]?.summary?.status, 'pending');
+    assert.equal(parentEvents[0]?.summary?.model, 'parent-event-model');
+    resolveFetch(new Response(JSON.stringify({ usage: { prompt_tokens: 1, total_tokens: 1 } })));
+    await fetchPromise;
+    await flushAsyncWork();
+    assert.ok(parentEvents.some(event => event.summary?.status === 'completed'));
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('broadcasts host-window captures back to the panel window', async () => {
+  let resolveFetch;
+  const routeResponse = new Promise(resolve => {
+    resolveFetch = resolve;
+  });
+  installTestEnvironment(async () => new Response('{}'));
+  const panelEvents = [];
+  window.dispatchEvent = event => {
+    if (event.type === CACHE_RECORDS_CHANGED_EVENT) panelEvents.push(event.detail);
+    return true;
+  };
+  const parentWindow = {
+    fetch: async () => routeResponse,
+    location: { href: 'http://localhost/' },
+    dispatchEvent: () => true,
+    CustomEvent,
+  };
+  window.parent = parentWindow;
+  window.top = parentWindow;
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    const fetchPromise = window.parent.fetch(TARGET_API, {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'host-event-model',
+        messages: [{ role: 'user', content: 'host window request' }],
+      }),
+    });
+    await flushAsyncWork();
+
+    assert.equal(panelEvents[0]?.summary?.status, 'pending');
+    assert.equal(panelEvents[0]?.summary?.model, 'host-event-model');
+    resolveFetch(new Response(JSON.stringify({ usage: { prompt_tokens: 1, total_tokens: 1 } })));
+    await fetchPromise;
+    await flushAsyncWork();
+    assert.ok(panelEvents.some(event => event.summary?.status === 'completed'));
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('reinstalls after TauriTavern replaces fetch before ready resolves', async () => {
+  let replacementCalls = 0;
+  let resolveReady;
+  const ready = new Promise(resolve => {
+    resolveReady = resolve;
+  });
+  const { stores } = installTestEnvironment(async () => {
+    return new Response(JSON.stringify({ usage: { prompt_tokens: 1, total_tokens: 1 } }));
+  });
+  window.__TAURITAVERN__ = { ready };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    const tauriReplacementFetch = async () => {
+      replacementCalls += 1;
+      return new Response(JSON.stringify({
+        usage: {
+          prompt_tokens_details: { cached_tokens: 3 },
+          prompt_tokens: 10,
+          completion_tokens: 2,
+          total_tokens: 12,
+        },
+      }));
+    };
+    window.fetch = tauriReplacementFetch;
+
+    resolveReady();
+    await flushAsyncWork();
+
+    assert.notEqual(window.fetch, tauriReplacementFetch);
+    await window.fetch(TARGET_API, {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'tauri-model',
+        messages: [{ role: 'user', content: 'after ready' }],
+      }),
+    });
+    await flushAsyncWork();
+
+    assert.equal(replacementCalls, 1);
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'tauri-model');
+    assert.equal(summary.hitTokens, 3);
+    assert.equal(stores.promptSnapshots.size, 1);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('captures TauriTavern fetch route when Tauri patches after the monitor', async () => {
+  let nativeCalls = 0;
+  let tauriRouteCalls = 0;
+  const { stores } = installTestEnvironment(async () => {
+    nativeCalls += 1;
+    return new Response(JSON.stringify({ usage: { prompt_tokens: 1, total_tokens: 1 } }));
+  });
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    const fetchSeenByTauri = window.fetch;
+    const tauriPatchedFetch = async (input, init) => {
+      if (String(input).includes(TARGET_API)) {
+        tauriRouteCalls += 1;
+        return new Response(JSON.stringify({
+          usage: {
+            prompt_tokens_details: { cached_tokens: 9 },
+            prompt_tokens: 18,
+            completion_tokens: 4,
+            total_tokens: 22,
+          },
+        }));
+      }
+      return fetchSeenByTauri(input, init);
+    };
+
+    window.fetch = tauriPatchedFetch;
+
+    assert.notEqual(window.fetch, tauriPatchedFetch);
+    await window.fetch(TARGET_API, {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'tauri-route-model',
+        messages: [{ role: 'user', content: 'direct tauri route' }],
+      }),
+    });
+    await window.fetch('/api/not-captured');
+    await flushAsyncWork();
+
+    assert.equal(tauriRouteCalls, 1);
+    assert.equal(nativeCalls, 1);
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'tauri-route-model');
+    assert.equal(summary.hitTokens, 9);
+    assert.equal(summary.totalTokens, 22);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('captures TauriTavern jQuery ajax requests', async () => {
+  let ajaxCalls = 0;
+  const { stores } = installTestEnvironment(async () => {
+    return new Response('{}');
+  });
+  installJQueryAjaxMock((..._args) => {
+    ajaxCalls += 1;
+    return createJqXHR({
+      usage: {
+        prompt_tokens_details: { cached_tokens: 11 },
+        prompt_tokens: 21,
+        completion_tokens: 8,
+        total_tokens: 29,
+      },
+    });
+  });
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    const jqXHR = window.$.ajax({
+      url: TARGET_API,
+      method: 'POST',
+      data: JSON.stringify({
+        model: 'ajax-model',
+        messages: [{ role: 'user', content: 'ajax cache' }],
+      }),
+    });
+    assert.ok(jqXHR);
+    await flushAsyncWork();
+
+    assert.equal(ajaxCalls, 1);
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'ajax-model');
+    assert.equal(summary.hitTokens, 11);
+    assert.equal(summary.totalTokens, 29);
+    assert.equal(stores.promptSnapshots.size, 1);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('captures TauriTavern ajax route when Tauri patches after the monitor', async () => {
+  let nativeAjaxCalls = 0;
+  let tauriRouteCalls = 0;
+  const { stores } = installTestEnvironment(async () => {
+    return new Response('{}');
+  });
+  installJQueryAjaxMock(() => {
+    nativeAjaxCalls += 1;
+    return createJqXHR({ usage: { prompt_tokens: 1, total_tokens: 1 } });
+  });
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    const ajaxSeenByTauri = window.$.ajax;
+    const tauriPatchedAjax = function tauriPatchedAjax(...args) {
+      const firstArg = args[0];
+      const url = typeof firstArg === 'string' ? firstArg : firstArg?.url;
+      if (String(url).includes(TARGET_API)) {
+        tauriRouteCalls += 1;
+        return createJqXHR({
+          usage: {
+            prompt_tokens_details: { cached_tokens: 6 },
+            prompt_tokens: 14,
+            completion_tokens: 3,
+            total_tokens: 17,
+          },
+        });
+      }
+      return ajaxSeenByTauri.apply(this, args);
+    };
+
+    window.$.ajax = tauriPatchedAjax;
+
+    assert.notEqual(window.$.ajax, tauriPatchedAjax);
+    await window.$.ajax({
+      url: TARGET_API,
+      method: 'POST',
+      data: JSON.stringify({
+        model: 'tauri-ajax-route-model',
+        messages: [{ role: 'user', content: 'direct ajax route' }],
+      }),
+    });
+    await window.$.ajax({ url: '/api/not-captured' });
+    await flushAsyncWork();
+
+    assert.equal(tauriRouteCalls, 1);
+    assert.equal(nativeAjaxCalls, 1);
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'tauri-ajax-route-model');
+    assert.equal(summary.hitTokens, 6);
+    assert.equal(summary.totalTokens, 17);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('reinstalls after TauriTavern replaces jQuery ajax before ready resolves', async () => {
+  let ajaxCalls = 0;
+  let resolveReady;
+  const ready = new Promise(resolve => {
+    resolveReady = resolve;
+  });
+  const { stores } = installTestEnvironment(async () => {
+    return new Response('{}');
+  });
+  installJQueryAjaxMock(() => createJqXHR({ usage: { prompt_tokens: 1, total_tokens: 1 } }));
+  window.__TAURITAVERN__ = { ready };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    const tauriReplacementAjax = function tauriReplacementAjax(..._args) {
+      ajaxCalls += 1;
+      return createJqXHR({
+        usage: {
+          prompt_tokens_details: { cached_tokens: 5 },
+          prompt_tokens: 16,
+          completion_tokens: 4,
+          total_tokens: 20,
+        },
+      });
+    };
+    window.$.ajax = tauriReplacementAjax;
+    window.jQuery.ajax = tauriReplacementAjax;
+
+    resolveReady();
+    await flushAsyncWork();
+
+    assert.notEqual(window.$.ajax, tauriReplacementAjax);
+    await window.$.ajax({
+      url: TARGET_API,
+      method: 'POST',
+      data: JSON.stringify({
+        model: 'tauri-ajax-model',
+        messages: [{ role: 'user', content: 'after ajax ready' }],
+      }),
+    });
+    await flushAsyncWork();
+
+    assert.equal(ajaxCalls, 1);
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'tauri-ajax-model');
+    assert.equal(summary.hitTokens, 5);
+    assert.equal(stores.promptSnapshots.size, 1);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('captures XMLHttpRequest requests when the host bypasses fetch and jQuery ajax', async () => {
+  let xhrCalls = 0;
+  const { stores } = installTestEnvironment(async () => {
+    return new Response('{}');
+  });
+  window.XMLHttpRequest = createXMLHttpRequestMock(() => {
+    xhrCalls += 1;
+    return {
+      status: 200,
+      statusText: 'OK',
+      responseText: JSON.stringify({
+        usage: {
+          prompt_tokens_details: { cached_tokens: 13 },
+          prompt_tokens: 21,
+          completion_tokens: 6,
+          total_tokens: 27,
+        },
+      }),
+    };
+  });
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    const xhr = new window.XMLHttpRequest();
+    xhr.open('POST', TARGET_API);
+    xhr.send(JSON.stringify({
+      model: 'xhr-model',
+      messages: [{ role: 'user', content: 'xhr cache' }],
+    }));
+    await flushAsyncWork();
+
+    assert.equal(xhrCalls, 1);
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'xhr-model');
+    assert.equal(summary.hitTokens, 13);
+    assert.equal(summary.totalTokens, 27);
+    assert.equal(stores.promptSnapshots.size, 1);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('captures TauriTavern native LLM API logs without relying on fetch patching', async () => {
+  let subscriber = null;
+  const rawEntries = new Map();
+  let fetchCalls = 0;
+  let resolveFetch;
+  const routeResponse = new Promise(resolve => {
+    resolveFetch = resolve;
+  });
+  const { stores } = installTestEnvironment(async () => {
+    fetchCalls += 1;
+    return routeResponse;
+  });
+  const completedRouteResponse = () =>
+    new Response(JSON.stringify({
+      usage: {
+        prompt_tokens_details: { cached_tokens: 1 },
+        prompt_tokens: 2,
+        total_tokens: 2,
+      },
+    }));
+  window.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    api: {
+      dev: {
+        llmApiLogs: {
+          index: async () => [],
+          getRaw: async id => rawEntries.get(id),
+          subscribeIndex: async handler => {
+            subscriber = handler;
+            return () => {};
+          },
+        },
+      },
+    },
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    await flushAsyncWork();
+    assert.equal(typeof subscriber, 'function');
+
+    const fetchPromise = window.fetch(TARGET_API, {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'fetch-should-not-duplicate',
+        messages: [{ role: 'user', content: 'fetch ignored when native log active' }],
+      }),
+    });
+    await flushAsyncWork();
+    assert.equal(fetchCalls, 1);
+    assert.equal(stores.summaryRecords.size, 1);
+    const [pendingSummary] = stores.summaryRecords.values();
+    assert.equal(pendingSummary.status, 'pending');
+    assert.equal(pendingSummary.model, 'fetch-should-not-duplicate');
+    const pendingId = pendingSummary.id;
+    resolveFetch(completedRouteResponse());
+    await fetchPromise;
+
+    rawEntries.set(1, {
+      id: 1,
+      requestRaw: JSON.stringify({
+        model: 'gemini-3-flash-preview',
+        contents: [{ role: 'user', parts: [{ text: 'native gemini payload' }] }],
+      }),
+      responseRaw: JSON.stringify({
+        usageMetadata: {
+          cachedContentTokenCount: 8,
+          promptTokenCount: 20,
+          candidatesTokenCount: 5,
+          totalTokenCount: 25,
+        },
+      }),
+      responseRawKind: 'json',
+    });
+
+    subscriber({
+      id: 1,
+      timestampMs: Date.now(),
+      ok: true,
+      source: 'gemini',
+      model: 'gemini-3-flash-preview',
+      endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent',
+      stream: false,
+    });
+    await flushAsyncWork();
+
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.id, pendingId);
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'gemini-3-flash-preview');
+    assert.equal(summary.messageCount, 1);
+    assert.equal(summary.hitTokens, 8);
+    assert.equal(summary.totalTokens, 25);
+    assert.equal(stores.promptSnapshots.size, 1);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('shows pending records from TauriTavern native invoke when route fetch is not visible', async () => {
+  let subscriber = null;
+  let resolveInvoke;
+  const rawEntries = new Map();
+  const invokeResult = new Promise(resolve => {
+    resolveInvoke = resolve;
+  });
+  const { stores } = installTestEnvironment(async () => new Response('{}'));
+  const changedEvents = [];
+  window.dispatchEvent = event => {
+    if (event.type === CACHE_RECORDS_CHANGED_EVENT) changedEvents.push(event.detail);
+    return true;
+  };
+  window.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    invoke: {
+      broker: {
+        invoke: async () => invokeResult,
+      },
+    },
+    api: {
+      dev: {
+        llmApiLogs: {
+          index: async () => [],
+          getRaw: async id => rawEntries.get(id),
+          subscribeIndex: async handler => {
+            subscriber = handler;
+            return () => {};
+          },
+        },
+      },
+    },
+  };
+  const payload = {
+    model: 'invoke-stream-model',
+    stream: true,
+    messages: [{ role: 'user', content: 'native invoke stream payload' }],
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    await flushAsyncWork();
+    assert.equal(typeof subscriber, 'function');
+
+    const startPromise = window.__TAURITAVERN__.invoke.broker.invoke('start_chat_completion_stream', {
+      streamId: 'stream-1',
+      dto: payload,
+    });
+    await flushAsyncWork();
+
+    assert.equal(stores.summaryRecords.size, 1);
+    const [pendingSummary] = stores.summaryRecords.values();
+    assert.equal(pendingSummary.status, 'pending');
+    assert.equal(pendingSummary.model, 'invoke-stream-model');
+    assert.equal(changedEvents[0]?.summary?.status, 'pending');
+    assert.equal(changedEvents[0]?.summary?.model, 'invoke-stream-model');
+    const pendingId = pendingSummary.id;
+
+    resolveInvoke({ started: true });
+    await startPromise;
+
+    rawEntries.set(3, {
+      id: 3,
+      requestRaw: JSON.stringify(payload),
+      responseRaw: [
+        'data: {"choices":[{"delta":{"content":"ok"}}]}',
+        'data: {"usage":{"prompt_cache_hit_tokens":12,"prompt_tokens":20,"completion_tokens":4,"total_tokens":24}}',
+        'data: [DONE]',
+      ].join('\n'),
+      responseRawKind: 'sse',
+    });
+    subscriber({ id: 3, timestampMs: Date.now(), ok: true, stream: true });
+    await flushAsyncWork();
+
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.id, pendingId);
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'invoke-stream-model');
+    assert.equal(summary.hitTokens, 12);
+    assert.equal(summary.totalTokens, 24);
+    assert.equal(stores.promptSnapshots.size, 1);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('retries TauriTavern native raw log reads because the event can arrive before raw files persist', async () => {
+  let subscriber = null;
+  let rawAttempts = 0;
+  const { stores } = installTestEnvironment(async () => {
+    return new Response('{}');
+  });
+  window.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    api: {
+      dev: {
+        llmApiLogs: {
+          index: async () => [],
+          getRaw: async id => {
+            rawAttempts += 1;
+            if (rawAttempts === 1) throw new Error(`raw ${id} not ready`);
+            return {
+              id,
+              requestRaw: JSON.stringify({
+                model: 'deepseek-v4-flash',
+                messages: [{ role: 'user', content: 'native stream payload' }],
+              }),
+              responseRaw: [
+                'data: {"choices":[{"delta":{"content":"ok"}}]}',
+                'data: {"usage":{"prompt_cache_hit_tokens":6,"prompt_tokens":14,"completion_tokens":3,"total_tokens":17}}',
+                'data: [DONE]',
+              ].join('\n'),
+              responseRawKind: 'sse',
+            };
+          },
+          subscribeIndex: async handler => {
+            subscriber = handler;
+            return () => {};
+          },
+        },
+      },
+    },
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    await flushAsyncWork();
+    subscriber({ id: 2, timestampMs: 1710000001000, ok: true, stream: true });
+    await wait(140);
+    await flushAsyncWork();
+
+    assert.equal(rawAttempts, 2);
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'deepseek-v4-flash');
+    assert.equal(summary.hitTokens, 6);
+    assert.equal(summary.totalTokens, 17);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+function installTestEnvironment(fetchImpl) {
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = async url => {
+    if (String(url).includes('frankfurter') || String(url).includes('open.er-api')) {
+      return new Response(JSON.stringify({ rates: { CNY: 6.8032 } }));
+    }
+    return fetchImpl(url);
+  };
+
+  const stores = createStores();
+  const testWindow = {
+    fetch: fetchImpl,
+    location: { href: 'http://localhost/' },
+    dispatchEvent: () => true,
+  };
+  testWindow.parent = testWindow;
+  testWindow.top = testWindow;
+
+  globalThis.window = testWindow;
+  globalThis.indexedDB = createIndexedDbMock(stores);
+  globalThis.CustomEvent = class CustomEvent {
+    constructor(type, init = {}) {
+      this.type = type;
+      this.detail = init.detail;
+    }
+  };
+
+  return { stores };
+}
+
+function installJQueryAjaxMock(ajaxImpl) {
+  const jquery = { ajax: ajaxImpl };
+  window.$ = jquery;
+  window.jQuery = jquery;
+}
+
+function cleanupTestEnvironment() {
+  globalThis.fetch = originalFetch;
+  originalFetch = undefined;
+  delete globalThis.window;
+  delete globalThis.indexedDB;
+  delete globalThis.CustomEvent;
+}
+
+function createStores() {
+  return {
+    summaryRecords: new Map(),
+    promptSnapshots: new Map(),
+  };
+}
+
+function createIndexedDbMock(stores) {
+  const db = {
+    objectStoreNames: {
+      contains: storeName => storeName in stores,
+    },
+    createObjectStore: storeName => createObjectStore(stores, storeName),
+    transaction: storeNames => createTransaction(stores, storeNames),
+    close: () => {},
+  };
+
+  return {
+    open: () => {
+      const request = createRequest(db);
+      queueMicrotask(() => {
+        request.transaction = createTransaction(stores, Object.keys(stores));
+        request.onupgradeneeded?.();
+        request.onsuccess?.();
+      });
+      return request;
+    },
+  };
+}
+
+function createTransaction(stores, storeNames) {
+  const transaction = {
+    error: null,
+    oncomplete: null,
+    onerror: null,
+    onabort: null,
+    objectStore: storeName => createObjectStore(stores, storeName),
+    abort: () => {
+      transaction.onabort?.();
+    },
+  };
+
+  queueMicrotask(() => transaction.oncomplete?.());
+  return transaction;
+}
+
+function createObjectStore(stores, storeName) {
+  const store = stores[storeName];
+  if (!store) throw new Error(`Unknown store: ${storeName}`);
+
+  return {
+    createIndex: () => {},
+    put: value => {
+      store.set(value.id, structuredClone(value));
+      return createRequest(value.id);
+    },
+    get: id => createRequest(cloneValue(store.get(id))),
+    getAll: () => createRequest(Array.from(store.values()).map(cloneValue)),
+    clear: () => {
+      store.clear();
+      return createRequest(undefined);
+    },
+    delete: id => {
+      store.delete(id);
+      return createRequest(undefined);
+    },
+  };
+}
+
+function createRequest(result) {
+  const request = {
+    result: undefined,
+    error: null,
+    onsuccess: null,
+    onerror: null,
+    onupgradeneeded: null,
+    transaction: null,
+  };
+
+  queueMicrotask(() => {
+    request.result = result;
+    request.onsuccess?.();
+  });
+  return request;
+}
+
+function cloneValue(value) {
+  return value === undefined ? undefined : structuredClone(value);
+}
+
+async function flushAsyncWork() {
+  for (let index = 0; index < 20; index += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+}
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function createJqXHR(data) {
+  const responseText = JSON.stringify(data);
+  return {
+    responseText,
+    done(callback) {
+      queueMicrotask(() => callback(data, 'success', { responseText }));
+      return this;
+    },
+    fail() {
+      return this;
+    },
+    then(resolve) {
+      queueMicrotask(() => resolve(data));
+      return Promise.resolve(data);
+    },
+  };
+}
+
+function createXMLHttpRequestMock(responseFactory) {
+  return class MockXMLHttpRequest {
+    static UNSENT = 0;
+    static OPENED = 1;
+    static HEADERS_RECEIVED = 2;
+    static LOADING = 3;
+    static DONE = 4;
+
+    status = 0;
+    statusText = '';
+    responseText = '';
+    listeners = new Map();
+    url = '';
+
+    open(_method, url) {
+      this.url = String(url);
+    }
+
+    send(_body) {
+      const response = responseFactory(this.url);
+      this.status = response.status;
+      this.statusText = response.statusText;
+      this.responseText = response.responseText;
+      queueMicrotask(() => this.dispatch('loadend'));
+    }
+
+    addEventListener(type, callback) {
+      const callbacks = this.listeners.get(type) ?? [];
+      callbacks.push(callback);
+      this.listeners.set(type, callbacks);
+    }
+
+    dispatch(type) {
+      for (const callback of this.listeners.get(type) ?? []) callback.call(this);
+    }
+  };
+}

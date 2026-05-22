@@ -1,4 +1,5 @@
 import type { CacheCostSnapshot, CacheUsageSnapshot, PricingSnapshot } from './types';
+import { getUsdToCnyRate } from './exchange-rate';
 
 type PricingProvider = PricingSnapshot['provider'];
 
@@ -19,7 +20,7 @@ type PricingRule = {
   rates: (usage: CacheUsageSnapshot) => PricingRateSet;
 };
 
-const SOURCE_DATE = '2026-05-06';
+const SOURCE_DATE = '2026-05-22';
 const GEMINI_PRO_THRESHOLD = 200_000;
 
 const PRICING_RULES: PricingRule[] = [
@@ -53,6 +54,40 @@ const PRICING_RULES: PricingRule[] = [
     }),
   },
   {
+    id: 'gemini-3.5-flash',
+    provider: 'gemini',
+    label: 'Gemini 3.5 Flash',
+    sourceUrl: 'https://ai.google.dev/gemini-api/docs/pricing',
+    sourceDate: SOURCE_DATE,
+    matches: model => includesAny(model, ['gemini-3.5-flash', 'gemini 3.5 flash']),
+    rates: () => ({
+      inputHitUsdPerMillion: 0.15,
+      inputMissUsdPerMillion: 1.5,
+      outputUsdPerMillion: 9,
+      note: 'Gemini 3.5 Flash standard text rate.',
+    }),
+  },
+  {
+    id: 'gemini-3.1-flash-lite',
+    provider: 'gemini',
+    label: 'Gemini 3.1 Flash-Lite',
+    sourceUrl: 'https://ai.google.dev/gemini-api/docs/pricing',
+    sourceDate: SOURCE_DATE,
+    matches: model =>
+      includesAny(model, [
+        'gemini-3.1-flash-lite',
+        'gemini-3.1-flash-lite-preview',
+        'gemini 3.1 flash-lite',
+        'gemini 3.1 flash lite',
+      ]),
+    rates: () => ({
+      inputHitUsdPerMillion: 0.025,
+      inputMissUsdPerMillion: 0.25,
+      outputUsdPerMillion: 1.5,
+      note: 'Gemini 3.1 Flash-Lite standard text/image/video rate.',
+    }),
+  },
+  {
     id: 'gemini-3.1-pro-preview',
     provider: 'gemini',
     label: 'Gemini 3.1 Pro Preview',
@@ -75,6 +110,20 @@ const PRICING_RULES: PricingRule[] = [
         note: largePrompt ? 'Gemini 3.1 Pro Preview standard prompts > 200k tier.' : 'Gemini 3.1 Pro Preview standard prompts <= 200k tier.',
       };
     },
+  },
+  {
+    id: 'gemini-3-flash-preview',
+    provider: 'gemini',
+    label: 'Gemini 3 Flash Preview',
+    sourceUrl: 'https://ai.google.dev/gemini-api/docs/pricing',
+    sourceDate: SOURCE_DATE,
+    matches: model => includesAny(model, ['gemini-3-flash-preview', 'gemini 3 flash preview']),
+    rates: () => ({
+      inputHitUsdPerMillion: 0.05,
+      inputMissUsdPerMillion: 0.5,
+      outputUsdPerMillion: 3,
+      note: 'Gemini 3 Flash Preview standard text/image/video rate.',
+    }),
   },
   {
     id: 'gpt-5.5',
@@ -136,12 +185,15 @@ export function estimateCacheCost(
   }
 
   const rates = rule.rates(usage);
+  const usdToCnyRate = getUsdToCnyRate();
   const pricingSnapshot: PricingSnapshot = {
     id: rule.id,
     provider: rule.provider,
     label: rule.label,
     sourceUrl: rule.sourceUrl,
     sourceDate: rule.sourceDate,
+    currency: 'CNY',
+    usdToCnyRate,
     inputHitUsdPerMillion: rates.inputHitUsdPerMillion,
     inputMissUsdPerMillion: rates.inputMissUsdPerMillion,
     outputUsdPerMillion: rates.outputUsdPerMillion,
@@ -159,22 +211,27 @@ export function estimateCacheCost(
   const inputHitUsd = priceTokens(usage.hitTokens, rates.inputHitUsdPerMillion);
   const inputMissUsd = priceTokens(usage.missTokens, rates.inputMissUsdPerMillion);
   const outputUsd = priceTokens(usage.outputTokens, rates.outputUsdPerMillion);
+  const savedUsd = Math.max(0, priceTokens(usage.hitTokens, rates.inputMissUsdPerMillion - rates.inputHitUsdPerMillion));
 
   return {
     pricingSnapshot,
     costSnapshot: {
-      currency: 'USD',
-      inputHitUsd,
-      inputMissUsd,
-      outputUsd,
-      totalUsd: inputHitUsd + inputMissUsd + outputUsd,
-      savedUsd: Math.max(0, priceTokens(usage.hitTokens, rates.inputMissUsdPerMillion - rates.inputHitUsdPerMillion)),
+      currency: 'CNY',
+      inputHitCny: usdToCny(inputHitUsd, usdToCnyRate),
+      inputMissCny: usdToCny(inputMissUsd, usdToCnyRate),
+      outputCny: usdToCny(outputUsd, usdToCnyRate),
+      totalCny: usdToCny(inputHitUsd + inputMissUsd + outputUsd, usdToCnyRate),
+      savedCny: usdToCny(savedUsd, usdToCnyRate),
     },
   };
 }
 
 function priceTokens(tokens: number, usdPerMillion: number): number {
   return (tokens * usdPerMillion) / 1_000_000;
+}
+
+function usdToCny(value: number, usdToCnyRate: number): number {
+  return value * usdToCnyRate;
 }
 
 function includesAny(model: string, fragments: string[]): boolean {
