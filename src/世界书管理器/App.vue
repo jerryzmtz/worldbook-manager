@@ -982,7 +982,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
 import CacheInspectorPanel from './cache-inspector/CacheInspectorPanel.vue';
 import { createCacheInspectorTutorial, createWorldbookTutorial } from './tutorial';
 
-const APP_VERSION = 'v2.31';
+const APP_VERSION = 'v2.32';
 
 type ActivePanel = 'optimizer' | 'cacheInspector';
 type PreviewStatus = 'changed' | 'unchanged' | 'filtered' | 'failed';
