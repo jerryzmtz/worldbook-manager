@@ -13,6 +13,7 @@ const TARGET_API = '/api/backends/chat-completions/generate';
 let originalFetch;
 let originalConsoleInfo;
 let originalConsoleWarn;
+let originalConsoleLog;
 
 test('captures normal SillyTavern fetch requests', async () => {
   let resolveFetch;
@@ -1219,8 +1220,10 @@ function installTestEnvironment(fetchImpl) {
   originalFetch = globalThis.fetch;
   originalConsoleInfo = console.info;
   originalConsoleWarn = console.warn;
+  originalConsoleLog = console.log;
   console.info = () => {};
   console.warn = () => {};
+  console.log = () => {};
   globalThis.fetch = async url => {
     if (String(url).includes('frankfurter') || String(url).includes('open.er-api')) {
       return new Response(JSON.stringify({ rates: { CNY: 6.8032 } }));
@@ -1260,8 +1263,10 @@ function cleanupTestEnvironment() {
   originalFetch = undefined;
   console.info = originalConsoleInfo;
   console.warn = originalConsoleWarn;
+  console.log = originalConsoleLog;
   originalConsoleInfo = undefined;
   originalConsoleWarn = undefined;
+  originalConsoleLog = undefined;
   delete globalThis.window;
   delete globalThis.indexedDB;
   delete globalThis.CustomEvent;

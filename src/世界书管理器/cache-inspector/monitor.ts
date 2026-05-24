@@ -9,12 +9,15 @@ const TAURI_VISIBLE_RESPONSE_FALLBACK_DELAY_MS = 500;
 const TAURI_PENDING_CAPTURE_MAX_AGE_MS = 30 * 60 * 1000;
 const TAURI_VISIBLE_RESPONSE_FALLBACK_TTL_MS = 2 * 60 * 1000;
 const TAURI_LOG_INDEX_POLL_INTERVAL_MS = 1500;
+const CACHE_INSPECTOR_TRACE_LIMIT = 300;
 export const CACHE_RECORDS_CHANGED_EVENT = 'worldbook-manager:cache-records-changed';
 
 type MonitorWindow = Window &
   typeof globalThis & {
     __wbmCacheInspectorPatchState?: CacheInspectorPatchState;
     __wbmCacheInspectorDiagnostics?: () => CacheInspectorDiagnostics;
+    __wbmCacheInspectorTrace?: CacheInspectorTraceEntry[];
+    __wbmCacheInspectorTraceDump?: () => CacheInspectorTraceEntry[];
     __WBM_CACHE_INSPECTOR_DEBUG__?: boolean;
     $?: JQueryLike;
     jQuery?: JQueryLike;
@@ -168,9 +171,21 @@ type CacheInspectorDiagnostics = {
   };
   tauriNativeLog: {
     active: boolean;
+    apis: number;
     subscriptions: number;
     processedIds: number;
+    processingIds: number;
+    retryIds: number;
+    pendingCaptures: number;
+    fallbackCaptures: number;
   };
+};
+
+type CacheInspectorTraceEntry = {
+  at: string;
+  ms: number;
+  stage: string;
+  details?: Record<string, unknown>;
 };
 
 export type CacheInspectorMonitorHandle = {
@@ -210,6 +225,9 @@ export function installCacheInspectorMonitor(): CacheInspectorMonitorHandle {
   };
 
   installTargets();
+  traceCacheInspector(safeGlobalMonitorWindow(), 'monitor.install', {
+    targetWindows: runtime.targetWindows.size,
+  });
   void refreshUsdToCnyRate();
   scheduleTauriReadyReinstall(runtime, installTargets);
   runtime.watchdogTimer = setInterval(installTargets, 1000);
@@ -795,6 +813,7 @@ function pollTauriNativeLogIndexIfNeeded(
   const lastPolledAt = runtime.tauriLogIndexPollTimes.get(llmApiLogs) ?? 0;
   if (now - lastPolledAt < TAURI_LOG_INDEX_POLL_INTERVAL_MS) return;
   runtime.tauriLogIndexPollTimes.set(llmApiLogs, now);
+  traceCacheInspector(targetWindow, 'tt.log.index.poll.schedule', tauriRuntimeTraceDetails(runtime));
   void pollTauriNativeLogIndex(runtime, targetWindow, llmApiLogs);
 }
 
@@ -806,6 +825,11 @@ async function pollTauriNativeLogIndex(
   if (typeof llmApiLogs.index !== 'function') return;
   try {
     const entries = await llmApiLogs.index({ limit: 50 });
+    traceCacheInspector(targetWindow, 'tt.log.index.poll.result', {
+      count: entries.length,
+      ids: entries.map(entry => entry.id).filter(id => typeof id === 'number').slice(0, 20),
+      ...tauriRuntimeTraceDetails(runtime),
+    });
     for (const entry of entries) {
       void captureTauriLlmApiLog(runtime, targetWindow, llmApiLogs, entry);
     }
@@ -921,6 +945,11 @@ function createPendingCaptureFromTauriInvoke(
     command: normalizedCommand,
     ...captureLogDetails(capture.summary),
   }, true);
+  traceCacheInspector(targetWindow, 'tt.invoke.pending.created', {
+    command: normalizedCommand,
+    ...captureLogDetails(capture.summary),
+    ...tauriRuntimeTraceDetails(runtime),
+  });
   announcePendingCapture(capture.summary);
   void saveCaptureSilently(capture.summary, capture.snapshot);
   queueTauriPendingCapture(runtime, capture);
@@ -974,16 +1003,41 @@ async function captureTauriLlmApiLog(
   entry: TauriLlmApiLogIndexEntry,
 ): Promise<void> {
   const logId = normalizePositiveInteger(entry.id);
-  if (!logId || runtime.tauriLogProcessedIds.has(logId) || runtime.tauriLogProcessingIds.has(logId)) return;
-  if (typeof llmApiLogs.getRaw !== 'function') return;
+  if (!logId) {
+    traceCacheInspector(targetWindow, 'tt.log.entry.skip.invalid-id', { entryId: entry.id });
+    return;
+  }
+  if (runtime.tauriLogProcessedIds.has(logId)) {
+    traceCacheInspector(targetWindow, 'tt.log.entry.skip.processed', { logId, ...tauriRuntimeTraceDetails(runtime) });
+    return;
+  }
+  if (runtime.tauriLogProcessingIds.has(logId)) {
+    traceCacheInspector(targetWindow, 'tt.log.entry.skip.processing', { logId, ...tauriRuntimeTraceDetails(runtime) });
+    return;
+  }
+  if (typeof llmApiLogs.getRaw !== 'function') {
+    traceCacheInspector(targetWindow, 'tt.log.entry.skip.no-getRaw', { logId });
+    return;
+  }
 
   runtime.tauriLogProcessingIds.add(logId);
+  traceCacheInspector(targetWindow, 'tt.log.entry.processing', {
+    logId,
+    timestampMs: entry.timestampMs ?? null,
+    ok: entry.ok ?? null,
+    stream: entry.stream ?? null,
+    ...tauriRuntimeTraceDetails(runtime),
+  });
   try {
-    const raw = await getTauriLogRawWithRetry(llmApiLogs, logId);
+    const raw = await getTauriLogRawWithRetry(llmApiLogs, logId, targetWindow);
     const payload = parseJsonObject(raw.requestRaw ?? '');
     if (!payload || !isChatCompletionPayload(payload)) {
       runtime.tauriLogProcessedIds.add(logId);
       runtime.tauriLogRetryIds.delete(logId);
+      traceCacheInspector(targetWindow, 'tt.log.raw.skip.non-chat-payload', {
+        logId,
+        hasRequestRaw: typeof raw.requestRaw === 'string',
+      });
       return;
     }
 
@@ -992,6 +1046,13 @@ async function captureTauriLlmApiLog(
     if (queuedCapture) {
       rebaseCaptureIdentity(capture, queuedCapture.summary.id, queuedCapture.summary.timestamp);
     }
+    traceCacheInspector(targetWindow, queuedCapture ? 'tt.log.pending.matched' : 'tt.log.pending.unmatched-new-record', {
+      logId,
+      queuedId: queuedCapture?.summary.id ?? null,
+      logRecordId: capture.summary.id,
+      ...captureLogDetails(capture.summary),
+      ...tauriRuntimeTraceDetails(runtime),
+    });
     logDiagnostic(targetWindow, 'info', 'TauriTavern 原生日志捕获生成请求', {
       logId,
       source: entry.source ?? null,
@@ -1009,6 +1070,7 @@ async function captureTauriLlmApiLog(
       });
       runtime.tauriLogProcessedIds.add(logId);
       runtime.tauriLogRetryIds.delete(logId);
+      traceCacheInspector(targetWindow, 'tt.log.entry.failed-status', { logId, id: capture.summary.id });
       return;
     }
 
@@ -1019,8 +1081,18 @@ async function captureTauriLlmApiLog(
     }
     runtime.tauriLogProcessedIds.add(logId);
     runtime.tauriLogRetryIds.delete(logId);
+    traceCacheInspector(targetWindow, 'tt.log.entry.completed', {
+      logId,
+      id: capture.summary.id,
+      ...tauriRuntimeTraceDetails(runtime),
+    });
   } catch (error) {
     runtime.tauriLogRetryIds.add(logId);
+    traceCacheInspector(targetWindow, 'tt.log.entry.raw-read-failed', {
+      logId,
+      error: formatError(error),
+      ...tauriRuntimeTraceDetails(runtime),
+    });
     logDiagnostic(targetWindow, 'warn', '读取 TauriTavern 原生 LLM 日志失败', {
       logId,
       error: formatError(error),
@@ -1041,6 +1113,10 @@ function queueTauriPendingCapture(runtime: CacheInspectorMonitorRuntime, capture
     return;
   }
   runtime.tauriPendingCaptures.push(capture);
+  traceCacheInspector(safeGlobalMonitorWindow(), 'tt.pending.queue', {
+    ...captureLogDetails(capture.summary),
+    ...tauriRuntimeTraceDetails(runtime),
+  });
 }
 
 function queueHostPendingCapture(runtime: CacheInspectorMonitorRuntime, capture: PendingCapture): void {
@@ -1218,15 +1294,42 @@ function rebaseCaptureIdentity(capture: PendingCapture, id: string, timestamp: n
   }
 }
 
-async function getTauriLogRawWithRetry(llmApiLogs: TauriLlmApiLogsApi, id: number): Promise<TauriLlmApiLogRaw> {
+async function getTauriLogRawWithRetry(
+  llmApiLogs: TauriLlmApiLogsApi,
+  id: number,
+  targetWindow: MonitorWindow | null,
+): Promise<TauriLlmApiLogRaw> {
   let lastError: unknown = null;
-  for (const delayMs of [0, 80, 180, 360, 720, 1200]) {
+  const retryDelays = [0, 80, 180, 360, 720, 1200, 2200, 4000];
+  for (const [attemptIndex, delayMs] of retryDelays.entries()) {
     if (delayMs > 0) await delay(delayMs);
     try {
       const raw = await llmApiLogs.getRaw?.(id);
-      if (raw && typeof raw.requestRaw === 'string') return raw;
+      if (raw && typeof raw.requestRaw === 'string') {
+        traceCacheInspector(targetWindow, 'tt.log.raw.read.ok', {
+          logId: id,
+          attempt: attemptIndex + 1,
+          delayMs,
+          responseRawKind: raw.responseRawKind ?? null,
+          requestRawLength: raw.requestRaw.length,
+          responseRawLength: typeof raw.responseRaw === 'string' ? raw.responseRaw.length : 0,
+        });
+        return raw;
+      }
+      traceCacheInspector(targetWindow, 'tt.log.raw.read.empty', {
+        logId: id,
+        attempt: attemptIndex + 1,
+        delayMs,
+        hasRaw: !!raw,
+      });
     } catch (error) {
       lastError = error;
+      traceCacheInspector(targetWindow, 'tt.log.raw.read.retry', {
+        logId: id,
+        attempt: attemptIndex + 1,
+        delayMs,
+        error: formatError(error),
+      });
     }
   }
   throw lastError ?? new Error(`无法读取 TauriTavern LLM 日志 ${id}`);
@@ -1331,6 +1434,17 @@ async function hydrateRecordFromUsage(record: CacheSummaryRecord, usage: Record<
     status: 'completed',
     errorMessage: usage ? null : '未返回缓存数据',
   } satisfies CacheSummaryRecord;
+  traceCacheInspector(safeGlobalMonitorWindow(), 'record.hydrate.usage', {
+    id: completedRecord.id,
+    model: completedRecord.model,
+    hasUsage: !!usage,
+    rawUsageKeys: usage ? Object.keys(usage).slice(0, 20) : [],
+    hitTokens: completedRecord.hitTokens,
+    missTokens: completedRecord.missTokens,
+    outputTokens: completedRecord.outputTokens,
+    totalTokens: completedRecord.totalTokens,
+    errorMessage: completedRecord.errorMessage,
+  });
   await saveCaptureSilently(completedRecord);
   logDiagnostic(safeGlobalMonitorWindow(), 'info', '请求记录已完成', {
     id: completedRecord.id,
@@ -1657,8 +1771,23 @@ function emptyUsageSnapshot(rawUsage: Record<string, unknown> | null): CacheUsag
 async function saveCaptureSilently(summary: CacheSummaryRecord, snapshot?: PromptSnapshotRecord | null): Promise<void> {
   try {
     await saveCacheCapture(summary, snapshot);
+    traceCacheInspector(safeGlobalMonitorWindow(), 'record.save.ok', {
+      id: summary.id,
+      status: summary.status,
+      model: summary.model,
+      hitTokens: summary.hitTokens,
+      missTokens: summary.missTokens,
+      totalTokens: summary.totalTokens,
+      snapshotSaved: !!snapshot,
+      errorMessage: summary.errorMessage,
+    });
     dispatchRecordsChanged(summary.id, summary);
   } catch (error) {
+    traceCacheInspector(safeGlobalMonitorWindow(), 'record.save.failed', {
+      id: summary.id,
+      status: summary.status,
+      error: formatError(error),
+    });
     console.warn('[缓存命中对比] 保存缓存记录失败', error);
   }
 }
@@ -2114,10 +2243,25 @@ function scheduleTauriVisibleResponseFallback(
   capture: PendingCapture,
   responseTextPromise: Promise<string>,
 ): void {
+  traceCacheInspector(safeGlobalMonitorWindow(), 'tt.visible-response-fallback.schedule', {
+    ...captureLogDetails(capture.summary),
+    delayMs: TAURI_VISIBLE_RESPONSE_FALLBACK_DELAY_MS,
+    ...tauriRuntimeTraceDetails(runtime),
+  });
   setTimeout(() => {
     if (runtime.destroyed) return;
     const fallbackCapture = moveTauriPendingCaptureToVisibleFallback(runtime, capture.summary.id);
-    if (!fallbackCapture) return;
+    if (!fallbackCapture) {
+      traceCacheInspector(safeGlobalMonitorWindow(), 'tt.visible-response-fallback.skip-not-pending', {
+        id: capture.summary.id,
+        ...tauriRuntimeTraceDetails(runtime),
+      });
+      return;
+    }
+    traceCacheInspector(safeGlobalMonitorWindow(), 'tt.visible-response-fallback.fire', {
+      ...captureLogDetails(fallbackCapture.summary),
+      ...tauriRuntimeTraceDetails(runtime),
+    });
 
     void responseTextPromise.then(
       text => hydrateRecordFromResponseText(fallbackCapture.summary, text),
@@ -2261,8 +2405,13 @@ function collectDiagnostics(runtime: CacheInspectorMonitorRuntime, targetWindow:
     },
     tauriNativeLog: {
       active: runtime.tauriNativeLogActive,
+      apis: runtime.tauriLogApis.size,
       subscriptions: runtime.tauriLogUnsubscribers.length,
       processedIds: runtime.tauriLogProcessedIds.size,
+      processingIds: runtime.tauriLogProcessingIds.size,
+      retryIds: runtime.tauriLogRetryIds.size,
+      pendingCaptures: runtime.tauriPendingCaptures.length,
+      fallbackCaptures: runtime.tauriVisibleResponseFallbackCaptures.length,
     },
   };
 }
@@ -2292,6 +2441,64 @@ function logDiagnostic(
     return;
   }
   method.call(consoleLike, `[缓存命中对比] ${message}`);
+}
+
+function traceCacheInspector(
+  targetWindow: MonitorWindow | null,
+  stage: string,
+  details?: Record<string, unknown>,
+): void {
+  const entry: CacheInspectorTraceEntry = {
+    at: new Date().toISOString(),
+    ms: Date.now(),
+    stage,
+  };
+  const sanitizedDetails = sanitizeTraceDetails(details);
+  if (sanitizedDetails) entry.details = sanitizedDetails;
+
+  const globalWindow = safeGlobalMonitorWindow();
+  pushTraceEntry(globalWindow, entry);
+  if (targetWindow && targetWindow !== globalWindow) pushTraceEntry(targetWindow, entry);
+
+  const consoleLike = globalThis.console;
+  const method = consoleLike?.log;
+  if (typeof method !== 'function') return;
+  method.call(consoleLike, `[缓存命中对比][trace] ${stage}`, entry.details ?? {});
+}
+
+function pushTraceEntry(targetWindow: MonitorWindow | null, entry: CacheInspectorTraceEntry): void {
+  if (!targetWindow) return;
+  try {
+    const trace = targetWindow.__wbmCacheInspectorTrace ?? [];
+    trace.push(entry);
+    if (trace.length > CACHE_INSPECTOR_TRACE_LIMIT) trace.splice(0, trace.length - CACHE_INSPECTOR_TRACE_LIMIT);
+    targetWindow.__wbmCacheInspectorTrace = trace;
+    targetWindow.__wbmCacheInspectorTraceDump = () => trace.slice();
+  } catch {
+    // 诊断缓冲区只用于复现问题，写入失败不影响捕获。
+  }
+}
+
+function sanitizeTraceDetails(details?: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!details) return undefined;
+  try {
+    return JSON.parse(JSON.stringify(details)) as Record<string, unknown>;
+  } catch {
+    return { note: 'trace details could not be serialized' };
+  }
+}
+
+function tauriRuntimeTraceDetails(runtime: CacheInspectorMonitorRuntime): Record<string, unknown> {
+  return {
+    tauriNativeLogActive: runtime.tauriNativeLogActive,
+    tauriLogApis: runtime.tauriLogApis.size,
+    tauriLogSubscriptions: runtime.tauriLogUnsubscribers.length,
+    tauriProcessedIds: runtime.tauriLogProcessedIds.size,
+    tauriProcessingIds: runtime.tauriLogProcessingIds.size,
+    tauriRetryIds: runtime.tauriLogRetryIds.size,
+    tauriPendingIds: runtime.tauriPendingCaptures.map(capture => capture.summary.id).slice(-10),
+    tauriFallbackIds: runtime.tauriVisibleResponseFallbackCaptures.map(capture => capture.summary.id).slice(-10),
+  };
 }
 
 function isDiagnosticLoggingEnabled(targetWindow: MonitorWindow | null): boolean {

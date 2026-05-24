@@ -445,6 +445,7 @@ const CHART_BASELINE = 116;
 const CHART_LEFT = 12;
 const CHART_RIGHT = 308;
 const PENDING_RECORD_REFRESH_DELAY_MS = 1500;
+const PANEL_TRACE_LIMIT = 300;
 
 type BarMark = {
   id: string;
@@ -467,6 +468,18 @@ type TokenBreakdown = {
   hitTokens: number;
   missTokens: number;
   outputTokens: number;
+};
+
+type CacheInspectorTraceEntry = {
+  at: string;
+  ms: number;
+  stage: string;
+  details?: Record<string, unknown>;
+};
+
+type CacheInspectorTraceWindow = Window & {
+  __wbmCacheInspectorTrace?: CacheInspectorTraceEntry[];
+  __wbmCacheInspectorTraceDump?: () => CacheInspectorTraceEntry[];
 };
 
 const panelElement = ref<HTMLElement | null>(null);
@@ -581,6 +594,7 @@ const requestLinePath = computed(() => linePath(requestLine.value.points));
 const requestAreaPath = computed(() => areaPath(requestLine.value.points));
 
 onMounted(() => {
+  logPanelTrace('panel.mount');
   void refreshRecords();
   void refreshUsdToCnyRate();
   window.addEventListener(CACHE_RECORDS_CHANGED_EVENT, handleRecordsChanged as EventListener);
@@ -665,6 +679,14 @@ async function confirmClearRecords(): Promise<void> {
 }
 
 function upsertRecord(summary: CacheSummaryRecord): void {
+  logPanelTrace('panel.event.upsert', {
+    id: summary.id,
+    status: summary.status,
+    model: summary.model,
+    hitTokens: summary.hitTokens,
+    missTokens: summary.missTokens,
+    totalTokens: summary.totalTokens,
+  });
   const existingIndex = records.value.findIndex(record => record.id === summary.id);
   const nextRecord = { ...summary };
   if (existingIndex >= 0) {
@@ -679,6 +701,11 @@ function upsertRecord(summary: CacheSummaryRecord): void {
 }
 
 function handleRecordsChanged(event: CacheRecordsChangedEvent): void {
+  logPanelTrace('panel.event.records-changed', {
+    recordId: event.detail?.recordId ?? null,
+    status: event.detail?.summary?.status ?? null,
+    model: event.detail?.summary?.model ?? null,
+  });
   if (event.detail?.summary) {
     upsertRecord(event.detail.summary);
     return;
@@ -706,6 +733,10 @@ function hasPendingRecords(): boolean {
 
 function schedulePendingRecordsRefresh(): void {
   if (pendingRecordsRefreshTimer !== null || isClearing.value || !hasPendingRecords()) return;
+  logPanelTrace('panel.pending.refresh.schedule', {
+    delayMs: PENDING_RECORD_REFRESH_DELAY_MS,
+    pendingIds: records.value.filter(record => record.status === 'pending').map(record => record.id).slice(0, 20),
+  });
   pendingRecordsRefreshTimer = setTimeout(() => {
     pendingRecordsRefreshTimer = null;
     void refreshPendingRecordsFromStorage();
@@ -727,9 +758,29 @@ async function refreshPendingRecordsFromStorage(): Promise<void> {
 
   pendingRecordsRefreshRunning = true;
   try {
-    records.value = mergeStoredCacheSummaries(records.value, await listCacheSummaries());
+    const beforePendingIds = new Set(records.value.filter(record => record.status === 'pending').map(record => record.id));
+    const storedRecords = await listCacheSummaries();
+    const transitions = storedRecords
+      .filter(record => beforePendingIds.has(record.id) && record.status !== 'pending')
+      .map(record => ({
+        id: record.id,
+        status: record.status,
+        hitTokens: record.hitTokens,
+        missTokens: record.missTokens,
+        totalTokens: record.totalTokens,
+        errorMessage: record.errorMessage,
+      }));
+    logPanelTrace('panel.pending.refresh.result', {
+      beforePendingCount: beforePendingIds.size,
+      storedCount: storedRecords.length,
+      transitions,
+    });
+    records.value = mergeStoredCacheSummaries(records.value, storedRecords);
     pruneSelection();
-  } catch {
+  } catch (error) {
+    logPanelTrace('panel.pending.refresh.failed', {
+      error: formatError(error),
+    });
     // 后台补偿刷新失败不打断面板；pending 仍存在时会继续尝试。
   } finally {
     pendingRecordsRefreshRunning = false;
@@ -750,6 +801,26 @@ function mergeStoredCacheSummaries(
 
 function sortRecordsByTimestampDesc(left: CacheSummaryRecord, right: CacheSummaryRecord): number {
   return right.timestamp - left.timestamp;
+}
+
+function logPanelTrace(stage: string, details?: Record<string, unknown>): void {
+  const entry: CacheInspectorTraceEntry = {
+    at: new Date().toISOString(),
+    ms: Date.now(),
+    stage,
+  };
+  if (details) entry.details = details;
+  try {
+    const traceWindow = window as CacheInspectorTraceWindow;
+    const trace = traceWindow.__wbmCacheInspectorTrace ?? [];
+    trace.push(entry);
+    if (trace.length > PANEL_TRACE_LIMIT) trace.splice(0, trace.length - PANEL_TRACE_LIMIT);
+    traceWindow.__wbmCacheInspectorTrace = trace;
+    traceWindow.__wbmCacheInspectorTraceDump = () => trace.slice();
+  } catch {
+    // 诊断日志不能影响面板本身。
+  }
+  console.log(`[缓存命中对比][trace] ${stage}`, details ?? {});
 }
 
 function syncCacheModalViewport(): void {
