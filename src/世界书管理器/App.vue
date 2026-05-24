@@ -12,6 +12,18 @@
           <div class="wbm-title-line">
             <h2>{{ activePanel === 'cacheInspector' ? '缓存命中对比' : '世界书缓存优化器' }}</h2>
             <span class="wbm-version">{{ APP_VERSION }}</span>
+            <button
+              class="wbm-version-manager-btn"
+              :class="{ checking: versionCheckRunning, available: versionUpdateAvailable }"
+              type="button"
+              :title="versionManagerButtonTitle"
+              :aria-label="versionManagerButtonTitle"
+              data-wbm-tutorial="version-manager"
+              @click="openVersionManager"
+            >
+              <i class="fa-solid" :class="versionManagerButtonIcon"></i>
+              <span v-if="versionUpdateAvailable" class="wbm-update-dot" aria-hidden="true"></span>
+            </button>
           </div>
         </div>
         <div class="wbm-header-actions">
@@ -53,7 +65,7 @@
         <div class="wbm-section-toolbar">
           <div>
             <h3>配置区</h3>
-            <span>世界书选择 · 修改规则 · 应用提醒</span>
+            <span>世界书选择 · 优化模式 · 应用提醒</span>
           </div>
           <button
             class="wbm-small-btn"
@@ -180,12 +192,12 @@
 
           <section class="wbm-panel wbm-rules-panel">
             <div class="wbm-panel-title">
-              <h3>修改规则</h3>
+              <h3>规则区</h3>
               <button
                 class="wbm-small-btn"
                 type="button"
-                title="查看修改规则说明"
-                aria-label="查看修改规则说明"
+                :title="`查看${currentModeOption.label}说明`"
+                :aria-label="`查看${currentModeOption.label}说明`"
                 @click="openRuleHelp"
               >
                 <i class="fa-solid fa-question"></i>
@@ -194,12 +206,31 @@
             </div>
 
             <div class="wbm-preset">
-              <div class="wbm-rule-map" aria-label="修改规则结构图">
+              <div class="wbm-mode-switch" aria-label="选择优化模式">
+                <button
+                  v-for="option in OPTIMIZER_MODE_OPTIONS"
+                  :key="option.value"
+                  class="wbm-mode-option"
+                  :class="{ active: optimizerMode === option.value }"
+                  type="button"
+                  :aria-pressed="optimizerMode === option.value"
+                  :disabled="isBusy"
+                  @click="setOptimizerMode(option.value)"
+                >
+                  <i class="fa-solid" :class="option.icon"></i>
+                  <span>
+                    <strong>{{ option.label }}</strong>
+                    <small>{{ option.subtitle }}</small>
+                  </span>
+                </button>
+              </div>
+
+              <div class="wbm-rule-map" :aria-label="`${currentModeOption.label}规则结构图`">
                 <div class="wbm-rule-map-title">
-                  <span>修改前</span>
-                  <span>修改后</span>
+                  <span>{{ ruleMapBeforeLabel }}</span>
+                  <span>{{ ruleMapAfterLabel }}</span>
                 </div>
-                <div v-for="flow in ruleFlowRows" :key="flow.id" class="wbm-rule-flow-row">
+                <div v-for="flow in activeRuleFlowRows" :key="flow.id" class="wbm-rule-flow-row">
                   <div class="wbm-flow-node" :class="`tone-${flow.fromTone}`">
                     <span class="wbm-action-dot" aria-hidden="true"></span>
                     <strong :style="ruleFlowLabelStyle(flow.from)">{{ flow.from }}</strong>
@@ -214,7 +245,11 @@
                 </div>
               </div>
               <p class="wbm-scope-note">
-                摘要、总结插件、数据库和隐藏消息用正则不属于世界书，需要在对应管理界面里进行单独处理。
+                {{
+                  optimizerMode === 'cache'
+                    ? '摘要、总结插件、数据库和隐藏消息用正则不属于世界书，需要在对应管理界面里进行单独处理。'
+                    : '合并只在每本世界书内部执行；同一批选中的世界书会一起生成意见，但不会跨书写入。'
+                }}
               </p>
             </div>
 
@@ -230,16 +265,13 @@
       >
         <div class="wbm-section-toolbar">
           <div>
-            <h3>修改意见区</h3>
-            <span
-              >命中 {{ previewSummary.matched }} · 建议修改 {{ previewSummary.changed }} · 待确认
-              {{ previewSummary.review }}</span
-            >
+            <h3>{{ previewSectionTitle }}</h3>
+            <span>{{ previewSectionSummary }}</span>
           </div>
           <button
             class="wbm-small-btn"
             type="button"
-            :title="isPreviewCollapsed ? '展开修改意见区' : '收起修改意见区'"
+            :title="`${isPreviewCollapsed ? '展开' : '收起'}${previewSectionTitle}`"
             @click="isPreviewCollapsed = !isPreviewCollapsed"
           >
             <i class="fa-solid" :class="isPreviewCollapsed ? 'fa-chevron-down' : 'fa-chevron-up'"></i>
@@ -248,30 +280,33 @@
         </div>
 
         <section v-show="!isPreviewCollapsed" class="wbm-preview">
-          <div class="wbm-preview-actions">
+          <div class="wbm-preview-actions" :class="{ 'speed-mode': optimizerMode !== 'cache' }">
             <button
-              class="wbm-primary-btn"
+              class="wbm-primary-btn wbm-generate-action"
               type="button"
               data-wbm-tutorial="generate-preview"
               :disabled="isBusy || !canPreview"
               @click="generateDefaultPreview"
             >
               <i class="fa-solid fa-magnifying-glass"></i>
-              生成修改意见
+              {{ generatePreviewButtonLabel }}
             </button>
             <button
-              class="wbm-primary-btn"
+              class="wbm-primary-btn wbm-apply-action"
               type="button"
               data-wbm-tutorial="apply"
               :disabled="isBusy || !canApply"
               @click="confirmApply"
             >
               <i class="fa-solid fa-check"></i>
-              应用修改
+              {{ applyButtonLabel }}
             </button>
             <button
-              class="wbm-small-btn"
+              v-if="optimizerMode === 'cache'"
+              class="wbm-small-btn wbm-structure-action"
               type="button"
+              title="查看结构图"
+              aria-label="查看结构图"
               data-wbm-tutorial="structure"
               :disabled="isBusy || previewRows.length === 0"
               @click="openStructureModal"
@@ -279,7 +314,7 @@
               <i class="fa-solid fa-layer-group"></i>
               结构图
             </button>
-            <label class="wbm-compact-field">
+            <label class="wbm-compact-field wbm-filter-field">
               <span class="wbm-compact-label">过滤</span>
               <select v-model="previewFilter" class="wbm-select" :disabled="isBusy">
                 <option value="all">全部</option>
@@ -287,7 +322,7 @@
                 <option value="review">待确认</option>
               </select>
             </label>
-            <label class="wbm-compact-field">
+            <label class="wbm-compact-field wbm-sort-field">
               <span class="wbm-compact-label">排序</span>
               <select v-model="previewSortMode" class="wbm-select" :disabled="isBusy">
                 <option value="custom">自定义</option>
@@ -369,7 +404,7 @@
                     class="wbm-icon-inline"
                     type="button"
                     title="编辑正文"
-                    :disabled="isBusy || item.status === 'failed'"
+                    :disabled="isBusy || item.status === 'failed' || optimizerMode !== 'cache'"
                     @click="startContentEditing(item)"
                   >
                     <i class="fa-solid fa-pencil"></i>
@@ -407,12 +442,12 @@
                 </div>
               </div>
               <div class="wbm-card-meta-grid">
-                <span>修改前</span>
+                <span>{{ beforeColumnLabel }}</span>
                 <span class="wbm-state-pill" :class="`tone-${item.fromTone}`">
                   <span class="wbm-action-dot" aria-hidden="true"></span>
                   {{ item.fromStateText }}
                 </span>
-                <span>修改后</span>
+                <span>{{ afterColumnLabel }}</span>
                 <span class="wbm-state-pill" :class="`tone-${item.toTone}`">
                   <span class="wbm-action-dot" aria-hidden="true"></span>
                   {{ item.toStateText }}
@@ -447,7 +482,7 @@
                 </template>
               </div>
             </article>
-            <div v-if="visiblePreviewRows.length === 0" class="wbm-empty">当前过滤条件下没有修改意见。</div>
+            <div v-if="visiblePreviewRows.length === 0" class="wbm-empty">{{ previewEmptyText }}</div>
           </div>
 
           <div class="wbm-table-wrap">
@@ -468,10 +503,10 @@
                       <small>{{ visiblePreviewStats.label }}</small>
                     </div>
                   </th>
-                  <th>修改前</th>
-                  <th>修改后</th>
+                  <th>{{ beforeColumnLabel }}</th>
+                  <th>{{ afterColumnLabel }}</th>
                   <th>顺序</th>
-                  <th>动态内容</th>
+                  <th>{{ riskColumnLabel }}</th>
                   <th>状态</th>
                 </tr>
               </thead>
@@ -517,7 +552,7 @@
                           class="wbm-icon-inline"
                           type="button"
                           title="编辑正文"
-                          :disabled="isBusy || item.status === 'failed'"
+                          :disabled="isBusy || item.status === 'failed' || optimizerMode !== 'cache'"
                           @click="startContentEditing(item)"
                         >
                           <i class="fa-solid fa-pencil"></i>
@@ -740,10 +775,10 @@
         class="wbm-confirm wbm-rule-help-modal"
         @click.self="closeRuleHelp"
       >
-        <div class="wbm-confirm-box wbm-rule-help-box" role="dialog" aria-modal="true" aria-label="修改规则说明">
+        <div class="wbm-confirm-box wbm-rule-help-box" role="dialog" aria-modal="true" :aria-label="ruleHelpAriaLabel">
           <header class="wbm-rule-help-head">
             <div>
-              <h3>修改规则说明</h3>
+              <h3>{{ ruleHelpTitle }}</h3>
             </div>
             <button class="wbm-icon-btn" type="button" title="关闭说明" @click="closeRuleHelp">
               <i class="fa-solid fa-times"></i>
@@ -751,7 +786,7 @@
           </header>
           <div class="wbm-rule-help-list">
             <article
-              v-for="item in ruleHelpItems"
+              v-for="item in activeRuleHelpItems"
               :key="item.id"
               class="wbm-rule-help-card"
               :class="`tone-${item.tone}`"
@@ -765,7 +800,7 @@
             </article>
           </div>
           <p class="wbm-rule-help-note">
-            摘要、总结插件、数据库和隐藏消息用正则不属于世界书本体，需要在对应功能里单独处理。
+            {{ ruleHelpNote }}
           </p>
         </div>
       </div>
@@ -938,7 +973,7 @@
           <h3>应用前提醒</h3>
           <p>
             将应用 {{ confirmState.bookCount }} 本世界书中的
-            {{ confirmState.changeCount }} 个建议。请自行备份，或确认这些世界书来自角色卡，
+            {{ confirmState.changeCount }} {{ confirmChangeUnit }}。请自行备份，或确认这些世界书来自角色卡，
             出问题时可以删除修改后的世界书并重新导入角色卡来进行恢复。
           </p>
           <label class="wbm-toggle-line wbm-confirm-option">
@@ -973,6 +1008,155 @@
           </div>
         </div>
       </div>
+      <div v-if="versionDialog.open" class="wbm-confirm wbm-version-modal" @click.self="closeVersionManager">
+        <div class="wbm-confirm-box wbm-version-box" role="dialog" aria-modal="true" aria-label="版本管理">
+          <div class="wbm-version-box-header">
+            <div>
+              <h3>版本管理</h3>
+              <p>选择版本和分发源，处理缓存或网络问题。</p>
+            </div>
+            <button class="wbm-icon-btn wbm-version-close" type="button" title="关闭版本管理" @click="closeVersionManager">
+              <i class="fa-solid fa-times"></i>
+            </button>
+          </div>
+
+          <div class="wbm-version-summary">
+            <div>
+              <span>当前版本</span>
+              <strong>{{ APP_VERSION }}</strong>
+            </div>
+            <div>
+              <span>最新版本</span>
+              <strong>{{ latestVersionLabel }}</strong>
+            </div>
+            <div>
+              <span>脚本来源</span>
+              <strong>{{ scriptVersionSourceLabel }}</strong>
+            </div>
+          </div>
+
+          <div v-if="scriptVersionSourceHint" class="wbm-version-hint" :class="scriptVersionSourceTone">
+            <i class="fa-solid" :class="scriptVersionSourceIcon"></i>
+            <span>{{ scriptVersionSourceHint }}</span>
+          </div>
+
+          <div v-if="versionCatalog.errorMessage" class="wbm-alert">
+            {{ versionCatalog.errorMessage }}
+          </div>
+
+          <section class="wbm-version-source">
+            <label class="wbm-version-source-field">
+              <span>分发源</span>
+              <select
+                v-model="selectedVersionImportSource"
+                class="wbm-select"
+                :disabled="versionDialog.busy"
+                @change="persistVersionImportSourcePreference"
+              >
+                <option v-for="source in versionImportSourceOptions" :key="source.id" :value="source.id">
+                  {{ source.label }}
+                </option>
+              </select>
+            </label>
+            <p>{{ selectedVersionImportDescription }}</p>
+            <label v-if="selectedVersionImportSource === CUSTOM_VERSION_IMPORT_SOURCE_ID" class="wbm-version-source-custom">
+              <span>自定义模板</span>
+              <input
+                v-model.trim="customVersionImportTemplate"
+                class="wbm-input"
+                type="text"
+                :disabled="versionDialog.busy"
+                placeholder="https://.../{version}/dist/世界书管理器/index.js"
+                @change="persistVersionImportSourcePreference"
+                @blur="persistVersionImportSourcePreference"
+              />
+            </label>
+            <p v-if="selectedVersionImportSource === CUSTOM_VERSION_IMPORT_SOURCE_ID" class="wbm-version-source-help">
+              适合填自建反代或可信镜像。需要包含 <code>{version}</code>，并指向本仓库的
+              <code>dist/世界书管理器/index.js</code>。
+            </p>
+            <p v-if="selectedVersionImportError" class="wbm-version-source-error">
+              <i class="fa-solid fa-triangle-exclamation"></i>
+              {{ selectedVersionImportError }}
+            </p>
+          </section>
+
+          <div class="wbm-version-actions">
+            <button
+              class="wbm-primary-btn"
+              type="button"
+              :disabled="!latestVersion || !versionUpdateAvailable || versionDialog.busy || !!selectedVersionImportError"
+              @click="latestVersion && requestVersionSwitch(latestVersion)"
+            >
+              <i class="fa-solid fa-cloud-arrow-down"></i>
+              更新到最新版
+            </button>
+            <button class="wbm-small-btn" type="button" :disabled="versionCheckRunning" @click="refreshVersionManager">
+              <i class="fa-solid fa-rotate"></i>
+              刷新版本
+            </button>
+          </div>
+
+          <div v-if="versionDialog.targetVersion" class="wbm-version-confirm-card">
+            <div class="wbm-version-target-head">
+              <div class="wbm-version-target-meta">
+                <span>
+                  目标版本
+                  <strong>{{ versionDialog.targetVersion }}</strong>
+                </span>
+                <span>
+                  分发源
+                  <strong>{{ formatVersionImportSource(selectedVersionImportTemplate) }}</strong>
+                </span>
+              </div>
+              <div class="wbm-version-target-actions">
+                <button
+                  class="wbm-small-btn"
+                  type="button"
+                  :disabled="!targetImportStatement"
+                  @click="copyTargetImportStatement"
+                >
+                  <i class="fa-solid fa-copy"></i>
+                  <span>复制</span>
+                </button>
+                <button class="wbm-small-btn" type="button" :disabled="versionDialog.busy" @click="cancelVersionSwitch">
+                  取消
+                </button>
+                <button
+                  class="wbm-danger-btn"
+                  type="button"
+                  :disabled="versionDialog.busy || !!selectedVersionImportError"
+                  @click="confirmVersionSwitch"
+                >
+                  {{ versionSwitchButtonLabel }}
+                </button>
+              </div>
+            </div>
+            <code>{{ targetImportStatement || selectedVersionImportError }}</code>
+          </div>
+
+          <div v-if="versionDialog.successMessage" class="wbm-version-result success">
+            <i class="fa-solid fa-circle-check"></i>
+            <span>{{ versionDialog.successMessage }}</span>
+            <button class="wbm-small-btn" type="button" @click="reloadPageForVersionChange">刷新页面</button>
+          </div>
+
+          <div class="wbm-version-list" data-wbm-version-list>
+            <button
+              v-for="row in versionRows"
+              :key="row.version"
+              class="wbm-version-row"
+              :class="row.relation"
+              type="button"
+              :disabled="versionDialog.busy || row.relation === 'current'"
+              @click="requestVersionSwitch(row.version)"
+            >
+              <span>{{ row.version }}</span>
+              <em>{{ row.statusText }}</em>
+            </button>
+          </div>
+        </div>
+      </div>
     </section>
   </div>
 </template>
@@ -980,11 +1164,36 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
 import CacheInspectorPanel from './cache-inspector/CacheInspectorPanel.vue';
+import { createBlueEntryMergePlan, type MergeGroup } from './blue-entry-merge';
 import { createCacheInspectorTutorial, createWorldbookTutorial } from './tutorial';
+import {
+  CUSTOM_VERSION_IMPORT_SOURCE_ID,
+  DEFAULT_VERSION_IMPORT_TEMPLATE,
+  VERSION_IMPORT_SOURCES,
+  compareVersionTags,
+  createScriptImportUrl,
+  fetchVersionCatalog,
+  getKnownVersionImportSourceByTemplate,
+  inspectCurrentScriptVersion,
+  replaceCurrentScriptVersion,
+  validateVersionImportTemplate,
+  versionRelation,
+  type ScriptVersionSource,
+  type VersionCatalog,
+  type VersionImportSourceId,
+  type VersionRelation,
+} from './version-manager';
 
-const APP_VERSION = 'v2.32';
+const APP_VERSION = 'v3.10';
+const EMPTY_VERSION_CATALOG: VersionCatalog = {
+  latestVersion: null,
+  versions: [],
+  checkedAt: 0,
+  errorMessage: null,
+};
 
 type ActivePanel = 'optimizer' | 'cacheInspector';
+type OptimizerMode = 'cache' | 'prompt_build_speed';
 type PreviewStatus = 'changed' | 'unchanged' | 'filtered' | 'failed';
 type PreviewFilter = 'changed' | 'review' | 'all';
 type StructureGraphMode = 'changed' | 'all';
@@ -1050,6 +1259,13 @@ type RuleHelpItem = {
   tone: ActionTone;
 };
 
+type OptimizerModeOption = {
+  value: OptimizerMode;
+  label: string;
+  subtitle: string;
+  icon: string;
+};
+
 type BookSourceBadge = {
   value: BookSource;
   label: string;
@@ -1094,6 +1310,7 @@ type PreviewChange = {
   contentEdited: boolean;
   tokenCount: number;
   tokenIsEstimated: boolean;
+  mergeSourceCount?: number;
   depthValue: number;
   orderValue: number;
   nextOrderValue: number;
@@ -1300,6 +1517,15 @@ type StructureState = {
   open: boolean;
 };
 
+type VersionDialogState = {
+  open: boolean;
+  targetVersion: string | null;
+  busy: boolean;
+  successMessage: string | null;
+};
+
+type VersionImportSourceSelection = VersionImportSourceId | typeof CUSTOM_VERSION_IMPORT_SOURCE_ID;
+
 type StructureBucket = {
   key: string;
   label: string;
@@ -1336,8 +1562,23 @@ const DATABASE_PLUGIN_STATUS_TEXT = '请单独设置数据库';
 const ENTRY_COOLDOWN_RISK_LABEL = '条目冷却设置';
 const APPLY_WARNING_DISMISSED_KEY = 'worldbook_manager_apply_warning_dismissed_v1';
 const BLUE_TOKEN_WARNING_DISMISSED_KEY = 'worldbook_manager_blue_token_warning_dismissed_v1';
+const VERSION_IMPORT_SOURCE_PREF_KEY = 'worldbook_manager_version_import_source_v1';
 const BLUE_TOKEN_WARNING_THRESHOLD = 400_000;
 const VISUAL_VIEWPORT_CSS_VAR = '--wbm-vvh';
+const OPTIMIZER_MODE_OPTIONS: OptimizerModeOption[] = [
+  {
+    value: 'cache',
+    label: '优化缓存',
+    subtitle: '调整灯色、深度和冷却',
+    icon: 'fa-gauge-high',
+  },
+  {
+    value: 'prompt_build_speed',
+    label: '优化提示词构建速度',
+    subtitle: '合并同位置蓝灯条目',
+    icon: 'fa-layer-group',
+  },
+];
 const DEFAULT_WORLDBOOK_IMPLICIT_FIELDS: WorldbookImplicitFields = {
   addMemo: true,
   matchPersonaDescription: false,
@@ -1426,6 +1667,8 @@ const STABLE_MACROS = new Set([
   'reasoningsuffix',
   'reasoningseparator',
   'newline',
+  '//',
+  'comment',
   'space',
   'noop',
   'trim',
@@ -1504,6 +1747,7 @@ const LEGACY_WARNING_MACROS = new Set(['group']);
 
 const isOpen = ref(false);
 const activePanel = ref<ActivePanel>('optimizer');
+const optimizerMode = ref<OptimizerMode>('cache');
 const isBusy = ref(false);
 const isSetupCollapsed = ref(false);
 const isPreviewCollapsed = ref(false);
@@ -1533,6 +1777,18 @@ const confirmState = reactive<ConfirmState>({ open: false, bookCount: 0, changeC
 const applyWarningDismissed = ref(readApplyWarningDismissed());
 const blueTokenWarningState = reactive<BlueTokenWarningState>({ open: false, doNotShowAgain: false });
 const blueTokenWarningDismissed = ref(readBlueTokenWarningDismissed());
+const versionDialog = reactive<VersionDialogState>({
+  open: false,
+  targetVersion: null,
+  busy: false,
+  successMessage: null,
+});
+const versionImportSourcePreference = readVersionImportSourcePreference();
+const selectedVersionImportSource = ref<VersionImportSourceSelection>(versionImportSourcePreference.sourceId);
+const customVersionImportTemplate = ref(versionImportSourcePreference.customTemplate);
+const versionCatalog = ref<VersionCatalog>({ ...EMPTY_VERSION_CATALOG });
+const versionCheckRunning = ref(false);
+const scriptVersionSource = ref<ScriptVersionSource>(inspectCurrentScriptVersion());
 const structureState = reactive<StructureState>({ open: false });
 const structureGraphMode = ref<StructureGraphMode>('changed');
 const customEditorState = reactive<CustomEditorState>({
@@ -1552,6 +1808,98 @@ const apiReady = computed(() => {
     typeof getWorldbook === 'function' &&
     typeof updateWorldbookWith === 'function'
   );
+});
+
+const latestVersion = computed(() => versionCatalog.value.latestVersion);
+const latestVersionLabel = computed(() => latestVersion.value ?? '未检查');
+const versionUpdateAvailable = computed(() => {
+  return latestVersion.value ? compareVersionTags(latestVersion.value, APP_VERSION) > 0 : false;
+});
+const versionManagerButtonTitle = computed(() => {
+  if (versionCheckRunning.value) return '正在检查版本';
+  if (versionUpdateAvailable.value && latestVersion.value) return `可更新到 ${latestVersion.value}`;
+  if (versionCatalog.value.errorMessage) return '版本检查失败，点击查看';
+  return '版本管理';
+});
+const versionManagerButtonIcon = computed(() => {
+  return 'fa-rotate';
+});
+const versionRows = computed(() => {
+  return versionCatalog.value.versions.map(version => {
+    const relation = versionRelation(version, APP_VERSION);
+    return {
+      version,
+      relation,
+      statusText: versionStatusText(relation),
+    };
+  });
+});
+const versionImportSourceOptions = computed(() => [
+  ...VERSION_IMPORT_SOURCES,
+  {
+    id: CUSTOM_VERSION_IMPORT_SOURCE_ID,
+    label: '自定义模板',
+    description: '自己填写可访问的代理或镜像模板，适合特殊网络环境。',
+    template: customVersionImportTemplate.value,
+  },
+]);
+const selectedKnownVersionImportSource = computed(() => {
+  if (selectedVersionImportSource.value === CUSTOM_VERSION_IMPORT_SOURCE_ID) return null;
+  return VERSION_IMPORT_SOURCES.find(source => source.id === selectedVersionImportSource.value) ?? null;
+});
+const selectedVersionImportTemplate = computed(() => {
+  return selectedKnownVersionImportSource.value?.template ?? customVersionImportTemplate.value;
+});
+const selectedVersionImportValidation = computed(() => validateVersionImportTemplate(selectedVersionImportTemplate.value));
+const selectedVersionImportDescription = computed(() => {
+  return selectedKnownVersionImportSource.value?.description ?? '模板需要包含 {version}，并指向本仓库的 index.js。';
+});
+const selectedVersionImportError = computed(() => {
+  return selectedVersionImportValidation.value.ok ? null : selectedVersionImportValidation.value.message;
+});
+const targetVersionImportUrl = computed(() => {
+  if (!versionDialog.targetVersion || !selectedVersionImportValidation.value.ok) return '';
+  return createScriptImportUrl(versionDialog.targetVersion, selectedVersionImportValidation.value.template);
+});
+const targetImportStatement = computed(() => {
+  return targetVersionImportUrl.value ? formatImportStatement(targetVersionImportUrl.value) : '';
+});
+const targetVersionRelation = computed(() => {
+  return versionDialog.targetVersion ? versionRelation(versionDialog.targetVersion, APP_VERSION) : null;
+});
+const versionSwitchButtonLabel = computed(() => {
+  if (targetVersionRelation.value === 'older') return '回退为此版本';
+  if (targetVersionRelation.value === 'newer') return '更新为此版本';
+  return '切换为此版本';
+});
+const scriptVersionSourceLabel = computed(() => {
+  const source = scriptVersionSource.value;
+  if (source.status === 'versioned') return `${source.specifier} · ${formatVersionImportSource(source.importTemplate)} · ${formatScriptScope(source.scope)}`;
+  if (source.status === 'main') return `main · ${formatVersionImportSource(source.importTemplate)} · ${formatScriptScope(source.scope)}`;
+  if (source.status === 'api_unavailable') return '脚本 API 不可用';
+  if (source.status === 'not_found') return '未找到当前脚本';
+  if (source.status === 'ambiguous') return '脚本位置不唯一';
+  if (source.status === 'no_import') return '非标准入口';
+  if (source.status === 'unsupported') return '版本格式不支持';
+  return '检查失败';
+});
+const scriptVersionSourceHint = computed(() => {
+  const source = scriptVersionSource.value;
+  if (source.status === 'versioned') {
+    return getKnownVersionImportSourceByTemplate(source.importTemplate)
+      ? null
+      : '当前脚本使用自定义分发源；本次更新或回退会沿用你在下方选择的分发源。';
+  }
+  if (source.status === 'main') return '当前使用 main，无法精确说明正在运行的 tag；选择列表中的版本后会改成固定版本。';
+  return source.message;
+});
+const scriptVersionSourceTone = computed(() => {
+  if (scriptVersionSource.value.status === 'main' || scriptVersionSource.value.status === 'versioned') return 'info';
+  return 'warning';
+});
+const scriptVersionSourceIcon = computed(() => {
+  if (scriptVersionSource.value.status === 'main' || scriptVersionSource.value.status === 'versioned') return 'fa-circle-info';
+  return 'fa-triangle-exclamation';
 });
 
 const customPositionOptions: Array<{ value: CustomPositionType; label: string }> = [
@@ -1630,6 +1978,41 @@ const ruleHelpItems: RuleHelpItem[] = [
   },
 ];
 
+const speedRuleHelpItems: RuleHelpItem[] = [
+  {
+    id: 'speed-scope',
+    label: '跨世界书范围',
+    description:
+      '所有选中的世界书会一起生成合并意见，但实际保存严格限制在各自世界书内，不会把 A 书条目合并到 B 书。',
+    targetText: '分书落地',
+    tone: 'blue',
+  },
+  {
+    id: 'speed-content',
+    label: '条目拼接',
+    description:
+      '同组源条目会按酒馆原本插入提示词的顺序，用一个换行边界拼成新蓝灯正文；新条目顶部会加 {{// 合并来源：...}} 注释记录源条目名，酒馆会把这个注释宏替换为空，不传入上下文。',
+    targetText: '带来源注释',
+    tone: 'green',
+  },
+  {
+    id: 'speed-delete',
+    label: '源条目处理',
+    description:
+      '应用时会新增一条合并后的蓝灯条目，并删除这一组里的源蓝灯条目。因此 UID 和条目数量会变化，应用前仍建议备份。',
+    targetText: '删除源条目',
+    tone: 'orange',
+  },
+  {
+    id: 'speed-safety',
+    label: '风险跳过',
+    description:
+      '带动态风险、示例消息、锚点、概率/预算/冷却/递归延迟、角色过滤、分组、触发器等行为差异的条目不会参与合并。',
+    targetText: '保守合并',
+    tone: 'orange',
+  },
+];
+
 const ruleFlowRows: RuleFlowRow[] = [
   {
     id: 'cooldown',
@@ -1675,6 +2058,37 @@ const ruleFlowRows: RuleFlowRow[] = [
   },
 ];
 
+const speedRuleFlowRows: RuleFlowRow[] = [
+  {
+    id: 'speed-scope',
+    from: '同书同位置蓝灯',
+    fromTone: 'blue',
+    to: '合并为一条',
+    toTone: 'blue',
+  },
+  {
+    id: 'speed-content',
+    from: '条目拼接',
+    fromTone: 'green',
+    to: '换行分隔',
+    toTone: 'blue',
+  },
+  {
+    id: 'speed-comment',
+    from: '源条目名',
+    fromTone: 'neutral',
+    to: '顶部注释',
+    toTone: 'neutral',
+  },
+  {
+    id: 'speed-risk',
+    from: '风险条目',
+    fromTone: 'orange',
+    to: '保持原样',
+    toTone: 'neutral',
+  },
+];
+
 function ruleFlowLabelUnits(label: string): number {
   return Math.max(
     4,
@@ -1713,6 +2127,41 @@ const validationMessage = computed(() => {
 
 const canPreview = computed(() => apiReady.value && !validationMessage.value);
 
+const currentModeOption = computed(
+  () => OPTIMIZER_MODE_OPTIONS.find(option => option.value === optimizerMode.value) ?? OPTIMIZER_MODE_OPTIONS[0],
+);
+
+const isPromptBuildSpeedMode = computed(() => optimizerMode.value === 'prompt_build_speed');
+
+const previewSectionTitle = computed(() => (isPromptBuildSpeedMode.value ? '合并意见区' : '修改意见区'));
+
+const previewSectionSummary = computed(() =>
+  isPromptBuildSpeedMode.value
+    ? `命中 ${previewSummary.value.matched} · 建议合并 ${previewSummary.value.changed} · 待确认 ${previewSummary.value.review}`
+    : `命中 ${previewSummary.value.matched} · 建议修改 ${previewSummary.value.changed} · 待确认 ${previewSummary.value.review}`,
+);
+
+const generatePreviewButtonLabel = computed(() => '生成方案');
+const applyButtonLabel = computed(() => (isPromptBuildSpeedMode.value ? '应用合并' : '应用修改'));
+const previewEmptyText = computed(() =>
+  isPromptBuildSpeedMode.value ? '当前过滤条件下没有合并意见。' : '当前过滤条件下没有修改意见。',
+);
+const beforeColumnLabel = computed(() => (isPromptBuildSpeedMode.value ? '合并前' : '修改前'));
+const afterColumnLabel = computed(() => (isPromptBuildSpeedMode.value ? '合并后' : '修改后'));
+const riskColumnLabel = computed(() => (isPromptBuildSpeedMode.value ? '安全检查' : '动态内容'));
+const confirmChangeUnit = computed(() => (isPromptBuildSpeedMode.value ? '个合并方案' : '个建议'));
+const ruleHelpTitle = computed(() => (isPromptBuildSpeedMode.value ? '合并规则说明' : '修改规则说明'));
+const ruleHelpAriaLabel = computed(() => ruleHelpTitle.value);
+const activeRuleHelpItems = computed(() => (isPromptBuildSpeedMode.value ? speedRuleHelpItems : ruleHelpItems));
+const activeRuleFlowRows = computed(() => (isPromptBuildSpeedMode.value ? speedRuleFlowRows : ruleFlowRows));
+const ruleMapBeforeLabel = computed(() => (isPromptBuildSpeedMode.value ? '合并前' : '修改前'));
+const ruleMapAfterLabel = computed(() => (isPromptBuildSpeedMode.value ? '合并后' : '修改后'));
+const ruleHelpNote = computed(() =>
+  isPromptBuildSpeedMode.value
+    ? '合并功能只处理世界书本体里的安全蓝灯条目；摘要、总结插件、数据库和隐藏消息用正则仍需在对应功能里单独处理。'
+    : '摘要、总结插件、数据库和隐藏消息用正则不属于世界书本体，需要在对应功能里单独处理。',
+);
+
 const previewSummary = computed(() => {
   return previewRows.value.reduce(
     (summary, row) => {
@@ -1745,6 +2194,21 @@ const visiblePreviewStats = computed(() => {
 });
 
 const postApplyBlueTokenStats = computed(() => {
+  if (isPromptBuildSpeedMode.value) {
+    const rows = previewRows.value.filter(row => row.status !== 'failed' && row.changed);
+    const tokenCount = rows.reduce((sum, row) => sum + row.tokenCount, 0);
+    const reducedCount = rows.reduce((sum, row) => sum + Math.max(0, (row.mergeSourceCount ?? 1) - 1), 0);
+    const tokenLabel = rows.some(row => row.tokenIsEstimated) ? 'Token≈' : 'Token';
+    return {
+      count: rows.length,
+      tokenCount,
+      tokenLabel,
+      formattedTokenCount: formatTokenCount(tokenCount),
+      isOverThreshold: false,
+      label: `待合并 ${rows.length} 组 · 净减少 ${reducedCount} 条蓝灯 · ${tokenLabel} ${formatTokenCount(tokenCount)}`,
+    };
+  }
+
   const rows = previewRows.value.filter(
     row => row.status !== 'failed' && row.nextEnabled && row.nextStrategyType === 'constant',
   );
@@ -1997,6 +2461,7 @@ onMounted(() => {
   window.visualViewport?.addEventListener('resize', syncVisualViewportHeight);
   window.visualViewport?.addEventListener('scroll', syncVisualViewportHeight);
   window.addEventListener('resize', syncVisualViewportHeight);
+  void checkVersionCatalog({ silent: true });
 });
 
 onUnmounted(() => {
@@ -2043,8 +2508,236 @@ function closeManager(): void {
   ruleHelpOpen.value = false;
   confirmState.open = false;
   blueTokenWarningState.open = false;
+  closeVersionManager();
   structureState.open = false;
   closeCustomEditor();
+}
+
+function openVersionManager(): void {
+  versionDialog.open = true;
+  resetVersionDialogMessages();
+  refreshScriptVersionSource({ syncImportSource: true });
+  scheduleModalViewportSync();
+  if (!versionCatalog.value.checkedAt || versionCatalog.value.errorMessage) {
+    void checkVersionCatalog({ silent: false });
+  }
+}
+
+function closeVersionManager(): void {
+  versionDialog.open = false;
+  versionDialog.targetVersion = null;
+}
+
+function refreshVersionManager(): void {
+  resetVersionDialogMessages();
+  refreshScriptVersionSource({ syncImportSource: true });
+  void checkVersionCatalog({ silent: false, force: true });
+}
+
+function requestVersionSwitch(version: string): void {
+  versionDialog.targetVersion = version;
+  versionDialog.successMessage = null;
+}
+
+function cancelVersionSwitch(): void {
+  versionDialog.targetVersion = null;
+}
+
+async function confirmVersionSwitch(): Promise<void> {
+  if (!versionDialog.targetVersion || versionDialog.busy || !selectedVersionImportValidation.value.ok) return;
+  versionDialog.busy = true;
+  versionDialog.successMessage = null;
+  persistVersionImportSourcePreference();
+  try {
+    const result = await replaceCurrentScriptVersion(
+      versionDialog.targetVersion,
+      { importTemplate: selectedVersionImportValidation.value.template },
+    );
+    if (result.ok) {
+      versionDialog.targetVersion = null;
+      versionDialog.successMessage = `已将「${result.scriptName}」切换到 ${result.targetVersion}，刷新页面后生效。`;
+      refreshScriptVersionSource();
+      notifySuccess('版本入口已更新，刷新页面后生效。');
+      return;
+    }
+
+    notifyError(`${result.reason} 请点击目标 import 旁的「复制」，然后粘贴到酒馆助手本脚本的内容栏。`);
+  } catch (error) {
+    notifyError(`${formatError(error)} 请点击目标 import 旁的「复制」，然后粘贴到酒馆助手本脚本的内容栏。`);
+  } finally {
+    versionDialog.busy = false;
+  }
+}
+
+async function checkVersionCatalog(options: { silent: boolean; force?: boolean }): Promise<void> {
+  if (versionCheckRunning.value && !options.force) return;
+  versionCheckRunning.value = true;
+  try {
+    const nextCatalog = await fetchVersionCatalog({ currentVersion: APP_VERSION, limit: 20 });
+    versionCatalog.value = nextCatalog;
+    if (nextCatalog.errorMessage && !options.silent) notifyError(nextCatalog.errorMessage);
+  } catch (error) {
+    versionCatalog.value = {
+      ...EMPTY_VERSION_CATALOG,
+      checkedAt: Date.now(),
+      errorMessage: formatError(error),
+    };
+    if (!options.silent) notifyError('版本检查失败。');
+  } finally {
+    versionCheckRunning.value = false;
+  }
+}
+
+function refreshScriptVersionSource(options: { syncImportSource?: boolean } = {}): void {
+  scriptVersionSource.value = inspectCurrentScriptVersion();
+  if (options.syncImportSource) syncVersionImportSourceFromScript(scriptVersionSource.value);
+}
+
+function resetVersionDialogMessages(): void {
+  versionDialog.targetVersion = null;
+  versionDialog.successMessage = null;
+}
+
+function syncVersionImportSourceFromScript(source: ScriptVersionSource): void {
+  if ((source.status !== 'versioned' && source.status !== 'main') || !source.importTemplate) return;
+  const knownSource = getKnownVersionImportSourceByTemplate(source.importTemplate);
+  if (knownSource) {
+    selectedVersionImportSource.value = knownSource.id;
+  } else {
+    selectedVersionImportSource.value = CUSTOM_VERSION_IMPORT_SOURCE_ID;
+    customVersionImportTemplate.value = source.importTemplate;
+  }
+  persistVersionImportSourcePreference();
+}
+
+function persistVersionImportSourcePreference(): void {
+  if (
+    selectedVersionImportSource.value !== CUSTOM_VERSION_IMPORT_SOURCE_ID &&
+    !VERSION_IMPORT_SOURCES.some(source => source.id === selectedVersionImportSource.value)
+  ) {
+    selectedVersionImportSource.value = 'jsdelivr';
+  }
+  if (selectedVersionImportSource.value !== CUSTOM_VERSION_IMPORT_SOURCE_ID && !customVersionImportTemplate.value) {
+    customVersionImportTemplate.value = DEFAULT_VERSION_IMPORT_TEMPLATE;
+  }
+  if (typeof updateVariablesWith !== 'function') return;
+  try {
+    updateVariablesWith(
+      variables => ({
+        ...variables,
+        [VERSION_IMPORT_SOURCE_PREF_KEY]: {
+          sourceId: selectedVersionImportSource.value,
+          customTemplate: customVersionImportTemplate.value,
+        },
+      }),
+      { type: 'script' },
+    );
+  } catch (error) {
+    console.warn(`[世界书缓存优化器] 保存版本分发源失败：${formatError(error)}`);
+  }
+}
+
+async function copyTargetImportStatement(): Promise<void> {
+  if (!targetImportStatement.value) return;
+  try {
+    await copyTextToClipboard(targetImportStatement.value);
+    notifyInfo('已复制目标版本 import 语句。');
+  } catch (error) {
+    console.warn(`[世界书缓存优化器] 复制 import 语句失败：${formatError(error)}`);
+    notifyError('复制失败，请手动选择 import 语句。');
+  }
+}
+
+async function copyTextToClipboard(text: string): Promise<void> {
+  try {
+    if (typeof builtin !== 'undefined' && typeof builtin.copyText === 'function') {
+      builtin.copyText(text);
+      return;
+    }
+  } catch {
+    // Continue through the other clipboard paths.
+  }
+
+  try {
+    copyTextWithSelection(text);
+    return;
+  } catch {
+    // Continue through the other clipboard paths.
+  }
+
+  try {
+    if (typeof triggerSlash === 'function') {
+      await triggerSlash(`/clipboard-set ${text}`);
+      return;
+    }
+  } catch {
+    // Continue through the async Clipboard API.
+  }
+
+  try {
+    await navigator.clipboard?.writeText(text);
+    if (navigator.clipboard?.writeText) {
+      return;
+    }
+  } catch {
+    // Embedded webviews and non-secure contexts often block Clipboard API.
+  }
+
+  throw new Error('无法写入系统剪贴板');
+}
+
+function copyTextWithSelection(text: string): void {
+  const textarea = document.createElement('textarea');
+  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '0';
+  textarea.style.top = '0';
+  textarea.style.width = '1px';
+  textarea.style.height = '1px';
+  textarea.style.opacity = '0';
+  textarea.style.pointerEvents = 'none';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+  try {
+    const copied = document.execCommand('copy');
+    if (!copied) throw new Error('document.execCommand("copy") returned false');
+  } finally {
+    document.body.removeChild(textarea);
+    activeElement?.focus({ preventScroll: true });
+  }
+}
+
+function reloadPageForVersionChange(): void {
+  if (typeof triggerSlash === 'function') {
+    void triggerSlash('/reload-page');
+    return;
+  }
+  window.location.reload();
+}
+
+function versionStatusText(relation: VersionRelation): string {
+  if (relation === 'current') return '当前';
+  if (relation === 'newer') return '可更新';
+  return '可回退';
+}
+
+function formatScriptScope(scope: string): string {
+  if (scope === 'global') return '全局脚本';
+  if (scope === 'preset') return '预设脚本';
+  if (scope === 'character') return '角色脚本';
+  return scope;
+}
+
+function formatVersionImportSource(template: string): string {
+  return getKnownVersionImportSourceByTemplate(template)?.label ?? '自定义源';
+}
+
+function formatImportStatement(importUrl: string): string {
+  return `import '${importUrl}';`;
 }
 
 function handleTutorialTriggerClick(event: MouseEvent): void {
@@ -2576,7 +3269,10 @@ async function generatePreview(options: GeneratePreviewOptions = {}): Promise<vo
           rows.push(createFailedRow(bookName, '世界书为空'));
           continue;
         }
-        rows.push(...buildBookPlan(bookName, entries, true).rows);
+        const plan = isPromptBuildSpeedMode.value
+          ? buildPromptBuildSpeedBookPlan(bookName, entries)
+          : buildBookPlan(bookName, entries, true);
+        rows.push(...plan.rows);
       } catch (error) {
         rows.push(createFailedRow(bookName, formatError(error)));
       }
@@ -2590,7 +3286,11 @@ async function generatePreview(options: GeneratePreviewOptions = {}): Promise<vo
       rowsWithTokens.filter(row => editingKeys.has(row.contentEditKey)).map(row => row.id),
     );
     if (rows.every(row => row.status !== 'changed')) {
-      notifyInfo('修改意见已生成，没有建议修改的条目。');
+      notifyInfo(
+        isPromptBuildSpeedMode.value
+          ? '合并方案已生成，没有可安全合并的蓝灯条目。'
+          : '修改意见已生成，没有建议修改的条目。',
+      );
     }
   } finally {
     isBusy.value = false;
@@ -2639,6 +3339,17 @@ function setStructureGraphMode(mode: StructureGraphMode): void {
   structureHighlightSource.value = null;
 }
 
+function setOptimizerMode(mode: OptimizerMode): void {
+  if (optimizerMode.value === mode) return;
+  optimizerMode.value = mode;
+  previewRows.value = [];
+  applyResults.value = [];
+  previewFilter.value = 'changed';
+  structureState.open = false;
+  structureHighlightSource.value = null;
+  resetPreviewManualState();
+}
+
 function setStructureHighlight(key: string): void {
   structureHighlightSource.value = key;
 }
@@ -2666,6 +3377,7 @@ function closeTransientModals(): void {
   confirmState.open = false;
   blueTokenWarningState.open = false;
   customEditorState.open = false;
+  closeVersionManager();
 }
 
 function scheduleModalViewportSync(): void {
@@ -2754,13 +3466,19 @@ async function applyChangesDirect(): Promise<void> {
   isBusy.value = true;
   applyResults.value = [];
   const results: ApplyResult[] = [];
+  let mergeReducedCount = 0;
   try {
     for (const bookName of selectedBooks.value) {
       try {
         const entries = await getWorldbook(bookName);
-        const plan = buildBookPlan(bookName, entries, false);
+        const plan = isPromptBuildSpeedMode.value
+          ? buildPromptBuildSpeedBookPlan(bookName, entries)
+          : buildBookPlan(bookName, entries, false);
         const changedCount = plan.changedCount;
         if (changedCount > 0) {
+          if (isPromptBuildSpeedMode.value) {
+            mergeReducedCount += plan.rows.reduce((sum, row) => sum + Math.max(0, (row.mergeSourceCount ?? 1) - 1), 0);
+          }
           await saveWorldbookImmediately(bookName, plan.entries);
           refreshWorldbookEditor(bookName);
         }
@@ -2782,9 +3500,17 @@ async function applyChangesDirect(): Promise<void> {
     }
     await generatePreview();
     if (failed > 0) {
-      notifyError(`应用完成，但有 ${failed} 本世界书失败；已修改 ${changed} 个条目。`);
+      notifyError(
+        isPromptBuildSpeedMode.value
+          ? `应用完成，但有 ${failed} 本世界书失败；已合并 ${changed} 组，净减少 ${mergeReducedCount} 条蓝灯。`
+          : `应用完成，但有 ${failed} 本世界书失败；已修改 ${changed} 个条目。`,
+      );
     } else {
-      notifySuccess(`应用完成，已修改 ${changed} 个条目。`);
+      notifySuccess(
+        isPromptBuildSpeedMode.value
+          ? `应用完成，已合并 ${changed} 组，净减少 ${mergeReducedCount} 条蓝灯。`
+          : `应用完成，已修改 ${changed} 个条目。`,
+      );
     }
   } finally {
     isBusy.value = false;
@@ -2946,6 +3672,32 @@ function readBlueTokenWarningDismissed(): boolean {
   } catch (error) {
     console.warn(`[世界书缓存优化器] 读取蓝灯 Token 提醒设置失败：${formatError(error)}`);
     return false;
+  }
+}
+
+function readVersionImportSourcePreference(): {
+  sourceId: VersionImportSourceSelection;
+  customTemplate: string;
+} {
+  if (typeof getVariables !== 'function') {
+    return { sourceId: 'jsdelivr', customTemplate: DEFAULT_VERSION_IMPORT_TEMPLATE };
+  }
+  try {
+    const raw = getVariables({ type: 'script' })[VERSION_IMPORT_SOURCE_PREF_KEY];
+    if (!isRecord(raw)) return { sourceId: 'jsdelivr', customTemplate: DEFAULT_VERSION_IMPORT_TEMPLATE };
+    const rawSourceId = raw.sourceId;
+    const sourceId =
+      rawSourceId === CUSTOM_VERSION_IMPORT_SOURCE_ID || VERSION_IMPORT_SOURCES.some(source => source.id === rawSourceId)
+        ? (rawSourceId as VersionImportSourceSelection)
+        : 'jsdelivr';
+    const customTemplate =
+      typeof raw.customTemplate === 'string' && raw.customTemplate.trim()
+        ? raw.customTemplate
+        : DEFAULT_VERSION_IMPORT_TEMPLATE;
+    return { sourceId, customTemplate };
+  } catch (error) {
+    console.warn(`[世界书缓存优化器] 读取版本分发源失败：${formatError(error)}`);
+    return { sourceId: 'jsdelivr', customTemplate: DEFAULT_VERSION_IMPORT_TEMPLATE };
   }
 }
 
@@ -3393,6 +4145,81 @@ function buildBookPlan(bookName: string, entries: WorldbookEntry[], includeFilte
     rows,
     entries: plans.map(plan => plan.next),
     changedCount: plans.filter(plan => !sameManagedEntry(plan.original, plan.next)).length,
+  };
+}
+
+function buildPromptBuildSpeedBookPlan(bookName: string, entries: WorldbookEntry[]): BookPlan {
+  const [bookPlan] = createBlueEntryMergePlan<WorldbookEntryWithImplicit>(
+    [{ name: bookName, entries: entries as WorldbookEntryWithImplicit[] }],
+    {
+      detectRisks: detectEntryRisks,
+      estimateTokens: estimateTokenCount,
+    },
+  ).books;
+
+  const rows = bookPlan.groups.map(group => createBlueMergePreviewRow(bookName, group));
+  return {
+    rows,
+    entries: bookPlan.entries as WorldbookEntry[],
+    changedCount: rows.length,
+  };
+}
+
+function createBlueMergePreviewRow(
+  bookName: string,
+  group: MergeGroup<WorldbookEntryWithImplicit>,
+): PreviewChange {
+  const first = group.sourceEntries[0];
+  const merged = group.mergedEntry;
+  const sourceCount = group.sourceEntries.length;
+  const firstIndex = Math.min(...group.sourceIndices);
+  const firstOrder = Number.isFinite(first.position.order) ? first.position.order : 0;
+  const mergedOrder = Number.isFinite(merged.position.order) ? merged.position.order : firstOrder;
+  return {
+    id: `merge:${bookName}:${group.sourceUids.join('+')}:${merged.uid}`,
+    contentEditKey: `merge:${bookName}:${merged.uid}`,
+    previewIndex: 0,
+    originalIndex: firstIndex,
+    promptRank: getPromptOrderRank(first, firstIndex),
+    nextPromptRank: getPromptOrderRank(merged, firstIndex),
+    worldbook: bookName,
+    uid: merged.uid,
+    uidText: `${group.sourceUids.join(', ')} -> ${merged.uid}`,
+    entryName: merged.name || '(合并蓝灯)',
+    fromText: formatPosition(first.position),
+    toText: formatPosition(merged.position),
+    nextEnabled: merged.enabled,
+    nextStrategyType: merged.strategy.type,
+    nextPosition: { ...merged.position },
+    nextProbability: merged.probability,
+    fromStateText: `蓝灯 ${sourceCount} 条`,
+    toStateText: '蓝灯 1 条',
+    fromTone: 'blue',
+    toTone: 'blue',
+    cacheZoneText: `同位置合并 · 净减少 ${sourceCount - 1} 条`,
+    strategyText: '删除源条目并新增合并蓝灯',
+    orderText: sourceCount > 1 ? `${firstOrder} 起 · 源顺序保留` : String(firstOrder),
+    riskText: '已通过安全筛选',
+    ruleLabel: '合并蓝灯',
+    status: 'changed',
+    changed: true,
+    reviewNeeded: false,
+    decisionKey: null,
+    entryAction: null,
+    actionChoices: [],
+    originalContent: group.content,
+    content: merged.content,
+    contentLength: merged.content.length,
+    contentEdited: false,
+    tokenCount: group.tokenEstimate,
+    tokenIsEstimated: true,
+    mergeSourceCount: sourceCount,
+    depthValue: getDepthSortValue(first.position),
+    orderValue: firstOrder,
+    nextOrderValue: mergedOrder,
+    probability: merged.probability,
+    priorityValue: extractPriorityValue(first),
+    riskHits: [],
   };
 }
 
@@ -4753,7 +5580,7 @@ select:disabled {
 
 .wbm-title-line {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   flex-wrap: wrap;
   min-width: 0;
@@ -4765,6 +5592,55 @@ select:disabled {
   font-weight: 700;
   line-height: 1;
   opacity: 0.78;
+}
+
+.wbm-version-manager-btn {
+  position: relative;
+  width: 30px;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 0;
+  background: rgba(42, 43, 47, 0.62);
+  color: var(--wbm-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.wbm-version-manager-btn:hover {
+  border-color: var(--wbm-border);
+  color: var(--wbm-text);
+  background: var(--wbm-surface-raised);
+}
+
+.wbm-version-manager-btn.available {
+  border-color: rgba(95, 130, 255, 0.72);
+  background: var(--wbm-blue-soft);
+  color: #dce5ff;
+  box-shadow: 0 0 0 3px rgba(77, 107, 254, 0.12);
+}
+
+.wbm-version-manager-btn.checking i {
+  animation: wbm-spin 0.9s linear infinite;
+}
+
+.wbm-update-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #7dd3fc;
+  box-shadow: 0 0 0 3px rgba(125, 211, 252, 0.18);
+}
+
+@keyframes wbm-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .wbm-header p {
@@ -5080,6 +5956,68 @@ select:disabled {
   gap: 12px;
   overflow: visible;
   padding-right: 2px;
+}
+
+.wbm-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.wbm-mode-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 54px;
+  padding: 9px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: var(--wbm-radius-md);
+  background: var(--wbm-surface-raised);
+  color: var(--wbm-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.wbm-mode-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.wbm-mode-option.active {
+  border-color: rgba(77, 107, 254, 0.78);
+  background: var(--wbm-blue-soft);
+  box-shadow: inset 3px 0 0 var(--wbm-blue);
+}
+
+.wbm-mode-option i {
+  color: var(--wbm-blue-strong);
+}
+
+.wbm-mode-option span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.wbm-mode-option strong,
+.wbm-mode-option small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wbm-mode-option strong {
+  font-size: 14px;
+  line-height: 1.15;
+}
+
+.wbm-mode-option small {
+  color: var(--wbm-muted);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .wbm-rule-map {
@@ -5885,6 +6823,289 @@ select:disabled {
   font-weight: 700;
 }
 
+.wbm-version-box {
+  width: min(560px, 100%);
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+}
+
+.wbm-version-box-header,
+.wbm-version-actions,
+.wbm-version-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.wbm-version-box-header {
+  justify-content: space-between;
+}
+
+.wbm-version-box-header p {
+  margin: 2px 0 0;
+  color: var(--wbm-muted);
+  opacity: 0.82;
+  font-size: 13px;
+}
+
+.wbm-version-close {
+  width: 36px;
+  height: 36px;
+}
+
+.wbm-version-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.wbm-version-summary > div,
+.wbm-version-confirm-card,
+.wbm-version-result,
+.wbm-version-hint {
+  border: 1px solid var(--wbm-border);
+  border-radius: var(--wbm-radius-md);
+  background: var(--wbm-surface-raised);
+}
+
+.wbm-version-summary > div {
+  padding: 8px 10px;
+}
+
+.wbm-version-summary span,
+.wbm-version-confirm-card span {
+  display: block;
+  color: var(--wbm-muted);
+  font-size: 12px;
+}
+
+.wbm-version-summary strong,
+.wbm-version-confirm-card strong {
+  display: block;
+  margin-top: 2px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+
+.wbm-version-hint {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  color: var(--wbm-muted);
+  line-height: 1.4;
+  font-size: 13px;
+}
+
+.wbm-version-hint.info {
+  border-color: rgba(77, 107, 254, 0.46);
+  background: var(--wbm-blue-softer);
+  color: #dbe5ff;
+}
+
+.wbm-version-hint.warning {
+  border-color: rgba(251, 191, 36, 0.42);
+  background: rgba(113, 63, 18, 0.18);
+}
+
+.wbm-version-source {
+  display: grid;
+  gap: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: var(--wbm-radius-md);
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.wbm-version-source-field,
+.wbm-version-source-custom {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.wbm-version-source-field > span,
+.wbm-version-source-custom > span {
+  color: var(--wbm-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.wbm-version-source p {
+  margin: 0;
+  color: var(--wbm-muted);
+  line-height: 1.4;
+  font-size: 13px;
+}
+
+.wbm-version-source-help code,
+.wbm-version-source-error code {
+  border-radius: 6px;
+  padding: 1px 5px;
+  background: rgba(0, 0, 0, 0.22);
+  color: #dbe5ff;
+}
+
+.wbm-version-source-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: #facc15 !important;
+}
+
+.wbm-version-actions {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wbm-version-confirm-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border-color: rgba(77, 107, 254, 0.52);
+  background: var(--wbm-blue-softer);
+}
+
+.wbm-version-target-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.wbm-version-target-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  min-width: 0;
+}
+
+.wbm-version-target-meta span {
+  min-width: 0;
+}
+
+.wbm-version-target-meta strong {
+  display: inline;
+  margin-left: 4px;
+}
+
+.wbm-version-target-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.wbm-version-target-actions .wbm-small-btn,
+.wbm-version-target-actions .wbm-danger-btn {
+  min-height: 38px;
+  padding: 0 10px;
+}
+
+.wbm-version-confirm-card code,
+.wbm-version-result code {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: auto;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: var(--wbm-radius-sm);
+  padding: 7px 8px;
+  background: rgba(0, 0, 0, 0.22);
+  color: #dbe5ff;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.wbm-version-result {
+  justify-content: space-between;
+  padding: 10px;
+}
+
+.wbm-version-result .wbm-small-btn {
+  flex: 0 0 auto;
+  min-width: 72px;
+  white-space: nowrap;
+}
+
+.wbm-version-result > div {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wbm-version-result.success {
+  border-color: rgba(74, 222, 128, 0.45);
+  background: rgba(22, 101, 52, 0.2);
+}
+
+.wbm-version-result.warning {
+  border-color: rgba(251, 191, 36, 0.46);
+  background: rgba(113, 63, 18, 0.18);
+}
+
+.wbm-version-list {
+  display: grid;
+  gap: 6px;
+  max-height: min(310px, calc(var(--wbm-vvh, 100dvh) - 370px));
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.wbm-version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--wbm-border);
+  border-radius: var(--wbm-radius-md);
+  min-height: 46px;
+  padding: 8px 10px;
+  background: var(--wbm-surface-raised);
+  color: var(--wbm-text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.wbm-version-row:hover:not(:disabled) {
+  border-color: rgba(95, 130, 255, 0.56);
+  background: rgba(77, 107, 254, 0.13);
+}
+
+.wbm-version-row span {
+  font-weight: 800;
+}
+
+.wbm-version-row em {
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: var(--wbm-muted);
+  font-style: normal;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.wbm-version-row.newer em {
+  border-color: rgba(77, 107, 254, 0.5);
+  color: #bdd0ff;
+}
+
+.wbm-version-row.older em {
+  border-color: rgba(251, 191, 36, 0.4);
+  color: #facc15;
+}
+
+.wbm-version-row.current {
+  cursor: default;
+}
+
 .wbm-token-warning-box {
   border-color: rgba(239, 68, 68, 0.78);
   box-shadow: 0 24px 80px rgba(127, 29, 29, 0.28);
@@ -6515,6 +7736,14 @@ select:disabled {
     grid-template-columns: 1fr;
   }
 
+  .wbm-mode-switch {
+    grid-template-columns: 1fr;
+  }
+
+  .wbm-mode-option {
+    min-height: 48px;
+  }
+
   .wbm-rule-map-title,
   .wbm-rule-flow-row {
     grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr);
@@ -6543,8 +7772,72 @@ select:disabled {
     font-size: 20px;
   }
 
+  .wbm-version-manager-btn {
+    width: 44px;
+    height: 44px;
+  }
+
   .wbm-header p {
     font-size: 13px;
+  }
+
+  .wbm-version-box {
+    width: 100%;
+    max-height: calc(var(--wbm-vvh, 100dvh) - 20px);
+    padding: 10px;
+  }
+
+  .wbm-version-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .wbm-version-source-field,
+  .wbm-version-source-custom {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .wbm-version-actions {
+    display: grid;
+    grid-template-columns: 1fr 120px;
+    gap: 8px;
+  }
+
+  .wbm-version-actions .wbm-primary-btn,
+  .wbm-version-actions .wbm-small-btn {
+    min-height: 44px;
+  }
+
+  .wbm-version-result {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .wbm-version-target-head {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .wbm-version-target-meta {
+    gap: 4px 12px;
+  }
+
+  .wbm-version-target-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 0.8fr) minmax(0, 1.4fr);
+    gap: 6px;
+  }
+
+  .wbm-version-target-actions .wbm-small-btn,
+  .wbm-version-target-actions .wbm-danger-btn {
+    width: 100%;
+    min-width: 0;
+    min-height: 42px;
+    padding: 0 8px;
+  }
+
+  .wbm-version-list {
+    max-height: min(300px, calc(var(--wbm-vvh, 100dvh) - 460px));
   }
 
   .wbm-book-list {
@@ -6555,22 +7848,114 @@ select:disabled {
   }
 
   .wbm-preview {
-    padding: 10px;
+    padding: 8px 10px 10px;
   }
 
-  .wbm-preview-actions,
   .wbm-row-actions {
     gap: 6px;
   }
 
   .wbm-preview-actions {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    align-items: end;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    align-items: stretch;
+    gap: 8px;
+    min-height: auto;
+    margin: 0 0 10px;
+    padding: 8px;
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    border-radius: 18px;
+    background: rgba(14, 15, 19, 0.72);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+
+  .wbm-preview-actions > .wbm-primary-btn,
+  .wbm-preview-actions > .wbm-small-btn {
+    width: 100%;
+    min-width: 0;
+    min-height: 46px;
+    padding: 0 8px;
+    gap: 5px;
+    font-size: 15px;
+    line-height: 1;
+    touch-action: manipulation;
+  }
+
+  .wbm-preview-actions > .wbm-generate-action {
+    grid-column: span 3;
+    border-radius: 18px;
+    box-shadow:
+      0 10px 24px rgba(77, 107, 254, 0.28),
+      inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  }
+
+  .wbm-preview-actions > .wbm-apply-action {
+    grid-column: span 2;
+    border-color: rgba(93, 122, 255, 0.45);
+    background: rgba(77, 107, 254, 0.18);
+    color: #e7ecff;
+    box-shadow: none;
+  }
+
+  .wbm-preview-actions > .wbm-structure-action {
+    grid-column: span 1;
+    min-width: 0;
+    padding: 0;
+    border-radius: 16px;
+    font-size: 0;
+  }
+
+  .wbm-preview-actions > .wbm-structure-action i {
+    margin: 0;
+    font-size: 20px;
+  }
+
+  .wbm-preview-actions.speed-mode > .wbm-primary-btn,
+  .wbm-preview-actions.speed-mode > .wbm-small-btn {
+    grid-column: span 3;
   }
 
   .wbm-preview-actions .wbm-compact-field {
     grid-column: span 3;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 4px;
+    height: 42px;
+    min-height: 42px;
+    min-width: 0;
+    padding: 0 8px;
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-radius: 15px;
+    background: rgba(255, 255, 255, 0.045);
+    box-sizing: border-box;
+    touch-action: manipulation;
+  }
+
+  .wbm-preview-actions .wbm-compact-field .wbm-select,
+  .wbm-preview-actions .wbm-compact-field:nth-of-type(2) .wbm-select {
+    width: 100%;
+    min-width: 0;
+    height: 40px;
+    min-height: 40px;
+    padding: 0 22px 0 4px;
+    border: 0;
+    border-radius: 0;
+    background-color: transparent;
+    box-shadow: none;
+    font-size: 15px;
+    font-weight: 700;
+  }
+
+  .wbm-preview-actions > label.wbm-compact-field > .wbm-compact-label {
+    align-self: center;
+    height: auto;
+    min-width: 0;
+    padding: 0;
+    line-height: 1;
+    color: rgba(164, 169, 182, 0.9);
+    font-size: 12px;
+    font-weight: 700;
   }
 
   .wbm-filter-stats {

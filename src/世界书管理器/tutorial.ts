@@ -1,5 +1,5 @@
 type TutorialPlacement = 'top' | 'right' | 'bottom' | 'left' | 'center';
-type TutorialAction = 'prev' | 'next' | 'skip' | 'never';
+type TutorialAction = 'prev' | 'next' | 'dismiss';
 
 type TutorialStep = {
   selector?: string | readonly string[];
@@ -70,6 +70,13 @@ const WORLDBOOK_STEPS: TutorialStep[] = [
     placement: 'center',
   },
   {
+    selector: '[data-wbm-tutorial="version-manager"]',
+    title: '版本管理',
+    content:
+      '标题旁边的旋转箭头会在后台检查脚本版本。有新版本时按钮会发亮；点击后可以更新到最新版，也可以选择旧版本回退、锁定或切换分发源。',
+    placement: 'bottom',
+  },
+  {
     selector: '.wbm-books-panel',
     title: '选择世界书',
     content: '先在这里选择要优化的世界书。建议通过自动选择来选中当前聊天、全局世界书和聊天世界书。',
@@ -77,13 +84,14 @@ const WORLDBOOK_STEPS: TutorialStep[] = [
   },
   {
     selector: '.wbm-rules-panel',
-    title: '规则与应用提醒',
-    content: '这里会简单介绍应用的默认规则；点右上角的说明按钮来确认每条规则的详细说明。',
+    title: '切换优化规则',
+    content:
+      '这里可以切换“优化缓存”和“优化提示词构建速度”。下方会展示当前模式会怎么处理世界书；点右上角的说明按钮可以查看每条规则的详细说明。',
     placement: 'left',
   },
   {
     selector: '.wbm-preview-actions',
-    title: '生成修改意见',
+    title: '生成方案',
     content: '点击后，脚本会先生成并展示修改建议，不会立刻修改世界书。下拉菜单可以切换过滤器和排序。',
     placement: 'bottom',
   },
@@ -197,7 +205,7 @@ const getSelectors = (step: TutorialStep): readonly string[] => {
 };
 
 const isTutorialAction = (action: string | undefined): action is TutorialAction =>
-  action === 'prev' || action === 'next' || action === 'skip' || action === 'never';
+  action === 'prev' || action === 'next' || action === 'dismiss';
 
 export function createWorldbookTutorial(options: WorldbookTutorialOptions = {}): WorldbookTutorial {
   return createTutorial(options, WORLDBOOK_STEPS, WORLDBOOK_STORAGE_KEY, '世界书缓存优化器');
@@ -339,6 +347,25 @@ function createTutorial(
       .wbm-tutorial-head i {
         color: #4d6bfe;
       }
+      .wbm-tutorial-close {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        margin: -5px -7px -5px auto;
+        border: 0;
+        border-radius: 10px;
+        background: transparent;
+        color: #c8cbd5;
+        cursor: pointer;
+        font-size: 18px;
+        line-height: 1;
+      }
+      .wbm-tutorial-close:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: #ffffff;
+      }
       .wbm-tutorial-body {
         padding: 14px 15px 12px;
         color: #d9dbe3;
@@ -352,7 +379,7 @@ function createTutorial(
       }
       .wbm-tutorial-actions {
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 8px;
         padding: 11px 12px;
         border-top: 1px solid #303137;
@@ -384,11 +411,6 @@ function createTutorial(
         color: #fff;
         font-weight: 800;
       }
-      .wbm-tutorial-btn.ghost {
-        border-color: transparent;
-        background: transparent;
-        color: #b7bac4;
-      }
       .wbm-tutorial-btn:disabled {
         opacity: 0.42;
         cursor: not-allowed;
@@ -406,9 +428,6 @@ function createTutorial(
         }
         .wbm-tutorial-body {
           overflow-y: auto;
-        }
-        .wbm-tutorial-actions {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
         .wbm-tutorial-btn {
           min-height: 40px;
@@ -816,8 +835,7 @@ function createTutorial(
   const runAction = (action: TutorialAction): void => {
     if (action === 'prev') goTo(-1);
     if (action === 'next') goTo(1);
-    if (action === 'skip') closeInternal(true);
-    if (action === 'never') {
+    if (action === 'dismiss') {
       saveState({ ...getState(), completed: true, disabled: true });
       closeInternal(false);
     }
@@ -928,6 +946,13 @@ function createTutorial(
       <div class="wbm-tutorial-head">
         <i class="fa-solid fa-circle-question"></i>
         <span>${escapeHtml(step.title)}</span>
+        <button
+          class="wbm-tutorial-close"
+          type="button"
+          title="关闭教程"
+          aria-label="关闭教程"
+          data-wbm-tutorial-action="dismiss"
+        >×</button>
       </div>
       <div class="wbm-tutorial-body">
         <div>${escapeHtml(step.content)}</div>
@@ -935,8 +960,6 @@ function createTutorial(
       </div>
       <div class="wbm-tutorial-actions">
         <button class="wbm-tutorial-btn" data-wbm-tutorial-action="prev" ${isFirst ? 'disabled' : ''}>上一步</button>
-        <button class="wbm-tutorial-btn ghost" data-wbm-tutorial-action="skip">跳过</button>
-        <button class="wbm-tutorial-btn ghost" data-wbm-tutorial-action="never">不再显示</button>
         <button class="wbm-tutorial-btn primary" data-wbm-tutorial-action="next">${isLast ? '完成' : '下一步'}</button>
       </div>
     `;
