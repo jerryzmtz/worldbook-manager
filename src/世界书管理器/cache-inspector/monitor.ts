@@ -5,6 +5,10 @@ import { saveCacheCapture } from './storage';
 import type { CacheSummaryRecord, CacheUsageSnapshot, PromptMessageSnapshot, PromptSnapshotRecord } from './types';
 
 const TARGET_API = '/api/backends/chat-completions/generate';
+const TAURI_VISIBLE_RESPONSE_FALLBACK_DELAY_MS = 500;
+const TAURI_PENDING_CAPTURE_MAX_AGE_MS = 30 * 60 * 1000;
+const TAURI_VISIBLE_RESPONSE_FALLBACK_TTL_MS = 2 * 60 * 1000;
+const TAURI_LOG_INDEX_POLL_INTERVAL_MS = 1500;
 export const CACHE_RECORDS_CHANGED_EVENT = 'worldbook-manager:cache-records-changed';
 
 type MonitorWindow = Window &
@@ -15,6 +19,8 @@ type MonitorWindow = Window &
     $?: JQueryLike;
     jQuery?: JQueryLike;
     XMLHttpRequest?: typeof XMLHttpRequest;
+    TavernHelper?: TavernHelperApi | null;
+    SillyTavern?: SillyTavernApi | null;
     __TAURITAVERN__?: {
       ready?: PromiseLike<unknown> | null;
       invoke?: {
@@ -34,6 +40,25 @@ type JQueryLike = {
 };
 
 type AjaxFunction = (this: unknown, ...args: unknown[]) => unknown;
+
+type HostCaptureFunction = (this: unknown, ...args: unknown[]) => unknown;
+
+type HostFunctionOwner = Record<string, unknown>;
+
+type HostFunctionPatch = {
+  owner: HostFunctionOwner;
+  key: string;
+  originalFunction: HostCaptureFunction;
+  patchedFunction: HostCaptureFunction;
+};
+
+type TavernHelperApi = HostFunctionOwner & {
+  generateRaw?: HostCaptureFunction;
+};
+
+type SillyTavernApi = {
+  getContext?: () => unknown;
+};
 
 type TauriLlmApiLogIndexEntry = {
   id?: number;
@@ -85,6 +110,8 @@ type CacheInspectorAjaxPatch = {
 type PendingCapture = {
   summary: CacheSummaryRecord;
   snapshot: PromptSnapshotRecord | null;
+  fallbackAt?: number;
+  hostCompletionHandled?: boolean;
 };
 
 type CacheInspectorPatchState = {
@@ -110,10 +137,15 @@ type CacheInspectorMonitorRuntime = {
   tauriLogApis: Set<TauriLlmApiLogsApi>;
   tauriLogProcessedIds: Set<number>;
   tauriLogProcessingIds: Set<number>;
+  tauriLogRetryIds: Set<number>;
+  tauriLogIndexPollTimes: Map<TauriLlmApiLogsApi, number>;
   tauriLogUnsubscribers: Array<() => void | PromiseLike<void>>;
   tauriNativeLogActive: boolean;
   tauriPendingCaptures: PendingCapture[];
+  tauriVisibleResponseFallbackCaptures: PendingCapture[];
   tauriInvokeBrokerPatches: TauriInvokeBrokerPatch[];
+  hostFunctionPatches: HostFunctionPatch[];
+  hostPendingCaptures: PendingCapture[];
 };
 
 type CacheInspectorDiagnostics = {
@@ -156,10 +188,15 @@ export function installCacheInspectorMonitor(): CacheInspectorMonitorHandle {
     tauriLogApis: new Set(),
     tauriLogProcessedIds: new Set(),
     tauriLogProcessingIds: new Set(),
+    tauriLogRetryIds: new Set(),
+    tauriLogIndexPollTimes: new Map(),
     tauriLogUnsubscribers: [],
     tauriNativeLogActive: false,
     tauriPendingCaptures: [],
+    tauriVisibleResponseFallbackCaptures: [],
     tauriInvokeBrokerPatches: [],
+    hostFunctionPatches: [],
+    hostPendingCaptures: [],
   };
 
   const installTargets = (): void => {
@@ -191,6 +228,9 @@ export function installCacheInspectorMonitor(): CacheInspectorMonitorHandle {
       }
       for (const brokerPatch of runtime.tauriInvokeBrokerPatches.splice(0)) {
         restoreTauriInvokeBrokerPatch(brokerPatch);
+      }
+      for (const functionPatch of runtime.hostFunctionPatches.splice(0)) {
+        restoreHostFunctionPatch(functionPatch);
       }
       runtime.targetWindows.forEach(releaseTargetWindow);
       runtime.targetWindows.clear();
@@ -246,6 +286,8 @@ function patchTargetWindow(runtime: CacheInspectorMonitorRuntime, targetWindow: 
   patchFetchTargetWindow(runtime, targetWindow);
   patchAjaxTargetWindow(runtime, targetWindow);
   patchXMLHttpRequestTargetWindow(runtime, targetWindow);
+  patchTavernHelperTargetWindow(runtime, targetWindow);
+  patchSillyTavernServiceTargetWindow(runtime, targetWindow);
   installDiagnostics(runtime, targetWindow);
 }
 
@@ -331,14 +373,19 @@ function createPatchedFetch(
     if (!shouldCapture(args[0])) return callFetchDelegate(targetWindow, patchState, args);
 
     const payload = await readPayload(args[0], args[1]);
-    const capture = createPendingCapture(runtime, payload);
+    const hostCapture = claimHostPendingCapture(runtime, payload);
+    const capture = hostCapture ?? createPendingCapture(runtime, payload);
     logDiagnostic(targetWindow, 'info', 'fetch 捕获生成请求', captureLogDetails(capture.summary), true);
-    announcePendingCapture(capture.summary);
-    void saveCaptureSilently(capture.summary, capture.snapshot);
+    if (!hostCapture) {
+      announcePendingCapture(capture.summary);
+      void saveCaptureSilently(capture.summary, capture.snapshot);
+    }
     if (runtime.tauriNativeLogActive) {
       queueTauriPendingCapture(runtime, capture);
       try {
-        return await callFetchDelegate(targetWindow, patchState, args);
+        const response = await callFetchDelegate(targetWindow, patchState, args);
+        scheduleTauriVisibleResponseFallback(runtime, capture, createResponseTextPromise(response));
+        return response;
       } catch (error) {
         forgetTauriPendingCapture(runtime, capture.summary.id);
         await saveCaptureSilently({
@@ -386,15 +433,18 @@ function createPatchedAjax(
 
     if (!request || !shouldCapture(request.url)) return callAjaxDelegate(ajaxPatch, this, args);
 
-    const capture = createPendingCapture(runtime, request.payload);
+    const hostCapture = claimHostPendingCapture(runtime, request.payload);
+    const capture = hostCapture ?? createPendingCapture(runtime, request.payload);
     logDiagnostic(targetWindow, 'info', 'jQuery.ajax 捕获生成请求', captureLogDetails(capture.summary), true);
-    announcePendingCapture(capture.summary);
-    void saveCaptureSilently(capture.summary, capture.snapshot);
+    if (!hostCapture) {
+      announcePendingCapture(capture.summary);
+      void saveCaptureSilently(capture.summary, capture.snapshot);
+    }
     if (runtime.tauriNativeLogActive) {
       queueTauriPendingCapture(runtime, capture);
       try {
         const result = callAjaxDelegate(ajaxPatch, this, args);
-        attachAjaxFailureHandler(capture.summary, result, () => forgetTauriPendingCapture(runtime, capture.summary.id));
+        attachAjaxTauriCompletionHandlers(runtime, capture, result);
         return result;
       } catch (error) {
         forgetTauriPendingCapture(runtime, capture.summary.id);
@@ -454,20 +504,27 @@ function createPatchedXMLHttpRequest(
 
     xhr.send = function patchedSend(body?: Document | XMLHttpRequestBodyInit | null): void {
       if (shouldCapture(requestUrlValue)) {
-        const capture = createPendingCapture(runtime, parseAjaxPayload(body));
+        const payload = parseAjaxPayload(body);
+        const hostCapture = claimHostPendingCapture(runtime, payload);
+        const capture = hostCapture ?? createPendingCapture(runtime, payload);
         logDiagnostic(targetWindow, 'info', 'XMLHttpRequest 捕获生成请求', captureLogDetails(capture.summary), true);
-        announcePendingCapture(capture.summary);
-        void saveCaptureSilently(capture.summary, capture.snapshot);
+        if (!hostCapture) {
+          announcePendingCapture(capture.summary);
+          void saveCaptureSilently(capture.summary, capture.snapshot);
+        }
         if (runtime.tauriNativeLogActive) queueTauriPendingCapture(runtime, capture);
         xhr.addEventListener(
           'loadend',
           () => {
-            if (runtime.tauriNativeLogActive && xhr.status >= 200 && xhr.status < 400) return;
-            if (runtime.tauriNativeLogActive) forgetTauriPendingCapture(runtime, capture.summary.id);
             if (xhr.status >= 200 && xhr.status < 400) {
+              if (runtime.tauriNativeLogActive) {
+                scheduleTauriVisibleResponseFallback(runtime, capture, Promise.resolve(xhr.responseText || ''));
+                return;
+              }
               void hydrateRecordFromResponseText(capture.summary, xhr.responseText || '');
               return;
             }
+            if (runtime.tauriNativeLogActive) forgetTauriPendingCapture(runtime, capture.summary.id);
             void saveCaptureSilently({
               ...capture.summary,
               status: 'failed',
@@ -494,15 +551,277 @@ function createPatchedXMLHttpRequest(
   return PatchedXMLHttpRequest;
 }
 
+function patchTavernHelperTargetWindow(runtime: CacheInspectorMonitorRuntime, targetWindow: MonitorWindow): void {
+  const helper = safeGetTavernHelper(targetWindow);
+  if (!helper || typeof helper.generateRaw !== 'function') return;
+
+  installHostFunctionPatch(runtime, helper, 'generateRaw', originalFunction =>
+    createPatchedTavernHelperGenerateRaw(runtime, targetWindow, originalFunction),
+  );
+}
+
+function patchSillyTavernServiceTargetWindow(runtime: CacheInspectorMonitorRuntime, targetWindow: MonitorWindow): void {
+  const context = safeGetSillyTavernContext(targetWindow);
+  if (!context) return;
+
+  const connectionManager = getRecordProperty(context, 'ConnectionManagerRequestService');
+  if (connectionManager && typeof connectionManager.sendRequest === 'function') {
+    installHostFunctionPatch(runtime, connectionManager, 'sendRequest', originalFunction =>
+      createPatchedConnectionManagerSendRequest(runtime, targetWindow, originalFunction),
+    );
+  }
+
+  const chatCompletionService = getRecordProperty(context, 'ChatCompletionService');
+  if (chatCompletionService && typeof chatCompletionService.processRequest === 'function') {
+    installHostFunctionPatch(runtime, chatCompletionService, 'processRequest', originalFunction =>
+      createPatchedCompletionServiceProcessRequest(runtime, targetWindow, originalFunction, 'chat-completion-service'),
+    );
+  }
+
+  const textCompletionService = getRecordProperty(context, 'TextCompletionService');
+  if (textCompletionService && typeof textCompletionService.processRequest === 'function') {
+    installHostFunctionPatch(runtime, textCompletionService, 'processRequest', originalFunction =>
+      createPatchedCompletionServiceProcessRequest(runtime, targetWindow, originalFunction, 'text-completion-service'),
+    );
+  }
+}
+
+function installHostFunctionPatch(
+  runtime: CacheInspectorMonitorRuntime,
+  owner: HostFunctionOwner,
+  key: string,
+  createPatchedFunction: (originalFunction: HostCaptureFunction) => HostCaptureFunction,
+): void {
+  const currentFunction = owner[key];
+  if (typeof currentFunction !== 'function') return;
+
+  const existingPatch = runtime.hostFunctionPatches.find(patch => patch.owner === owner && patch.key === key);
+  if (existingPatch) {
+    if (currentFunction === existingPatch.patchedFunction) return;
+    existingPatch.originalFunction = currentFunction as HostCaptureFunction;
+    existingPatch.patchedFunction = createPatchedFunction(existingPatch.originalFunction);
+    safeSetHostFunction(owner, key, existingPatch.patchedFunction);
+    return;
+  }
+
+  const originalFunction = currentFunction as HostCaptureFunction;
+  const patch: HostFunctionPatch = {
+    owner,
+    key,
+    originalFunction,
+    patchedFunction: createPatchedFunction(originalFunction),
+  };
+  if (!safeSetHostFunction(owner, key, patch.patchedFunction)) return;
+  runtime.hostFunctionPatches.push(patch);
+}
+
+function createPatchedTavernHelperGenerateRaw(
+  runtime: CacheInspectorMonitorRuntime,
+  targetWindow: MonitorWindow,
+  originalFunction: HostCaptureFunction,
+): HostCaptureFunction {
+  return function patchedTavernHelperGenerateRaw(this: unknown, ...args: unknown[]): unknown {
+    const payload = tavernHelperGenerateRawArgsToPayload(args);
+    const capture = createPendingCapture(runtime, payload);
+    logDiagnostic(targetWindow, 'info', 'TavernHelper.generateRaw 捕获生成请求', captureLogDetails(capture.summary), true);
+    return captureHostFunctionResult(runtime, capture, () => originalFunction.apply(this, args));
+  };
+}
+
+function createPatchedConnectionManagerSendRequest(
+  runtime: CacheInspectorMonitorRuntime,
+  targetWindow: MonitorWindow,
+  originalFunction: HostCaptureFunction,
+): HostCaptureFunction {
+  return function patchedConnectionManagerSendRequest(this: unknown, ...args: unknown[]): unknown {
+    const payload = connectionManagerSendRequestArgsToPayload(args);
+    const capture = createPendingCapture(runtime, payload);
+    logDiagnostic(
+      targetWindow,
+      'info',
+      'ConnectionManagerRequestService.sendRequest 捕获生成请求',
+      captureLogDetails(capture.summary),
+      true,
+    );
+    return captureHostFunctionResult(runtime, capture, () => originalFunction.apply(this, args));
+  };
+}
+
+function createPatchedCompletionServiceProcessRequest(
+  runtime: CacheInspectorMonitorRuntime,
+  targetWindow: MonitorWindow,
+  originalFunction: HostCaptureFunction,
+  source: string,
+): HostCaptureFunction {
+  return function patchedCompletionServiceProcessRequest(this: unknown, ...args: unknown[]): unknown {
+    if (hasMatchingHostCapture(runtime, serviceProcessRequestArgsToPayload(args))) {
+      return originalFunction.apply(this, args);
+    }
+
+    const payload = serviceProcessRequestArgsToPayload(args);
+    const capture = createPendingCapture(runtime, payload);
+    logDiagnostic(targetWindow, 'info', `${source} 捕获生成请求`, captureLogDetails(capture.summary), true);
+    return captureHostFunctionResult(runtime, capture, () => originalFunction.apply(this, args));
+  };
+}
+
+function captureHostFunctionResult(
+  runtime: CacheInspectorMonitorRuntime,
+  capture: PendingCapture,
+  callOriginal: () => unknown,
+): unknown {
+  announcePendingCapture(capture.summary);
+  void saveCaptureSilently(capture.summary, capture.snapshot);
+  queueHostPendingCapture(runtime, capture);
+  if (runtime.tauriNativeLogActive) queueTauriPendingCapture(runtime, capture);
+
+  let result: unknown;
+  try {
+    result = callOriginal();
+  } catch (error) {
+    forgetHostPendingCapture(runtime, capture.summary.id);
+    forgetTauriPendingCapture(runtime, capture.summary.id);
+    void saveCaptureSilently({
+      ...capture.summary,
+      status: 'failed',
+      errorMessage: formatError(error),
+    });
+    throw error;
+  }
+
+  if (isPromiseLike(result)) {
+    return Promise.resolve(result).then(
+      value => completeHostFunctionCapture(runtime, capture, value),
+      error => {
+        forgetHostPendingCapture(runtime, capture.summary.id);
+        forgetTauriPendingCapture(runtime, capture.summary.id);
+        void saveCaptureSilently({
+          ...capture.summary,
+          status: 'failed',
+          errorMessage: formatError(error),
+        });
+        throw error;
+      },
+    );
+  }
+
+  void completeHostFunctionCapture(runtime, capture, result);
+  return result;
+}
+
+async function completeHostFunctionCapture(
+  runtime: CacheInspectorMonitorRuntime,
+  capture: PendingCapture,
+  value: unknown,
+): Promise<unknown> {
+  forgetHostPendingCapture(runtime, capture.summary.id);
+  if (capture.hostCompletionHandled) return value;
+
+  if (typeof value === 'function') {
+    return wrapStreamFactoryResult(runtime, capture, value as (...args: unknown[]) => unknown);
+  }
+
+  if (runtime.tauriNativeLogActive) {
+    scheduleTauriVisibleResponseFallback(runtime, capture, Promise.resolve(safeStringify(value) ?? ''));
+    return value;
+  }
+
+  await hydrateRecordFromResponseValue(capture.summary, value, safeStringify(value));
+  return value;
+}
+
+function wrapStreamFactoryResult(
+  runtime: CacheInspectorMonitorRuntime,
+  capture: PendingCapture,
+  streamFactory: (...args: unknown[]) => unknown,
+): (...args: unknown[]) => unknown {
+  return function patchedStreamFactory(this: unknown, ...args: unknown[]): unknown {
+    const stream = streamFactory.apply(this, args);
+    if (!isAsyncIterable(stream)) return stream;
+    return wrapAsyncIterable(runtime, capture, stream);
+  };
+}
+
+async function* wrapAsyncIterable(
+  runtime: CacheInspectorMonitorRuntime,
+  capture: PendingCapture,
+  stream: AsyncIterable<unknown>,
+): AsyncGenerator<unknown> {
+  let lastValue: unknown = null;
+  try {
+    for await (const value of stream) {
+      lastValue = value;
+      yield value;
+    }
+    if (runtime.tauriNativeLogActive) {
+      scheduleTauriVisibleResponseFallback(runtime, capture, Promise.resolve(safeStringify(lastValue) ?? ''));
+    } else {
+      await hydrateRecordFromResponseValue(capture.summary, lastValue, safeStringify(lastValue));
+    }
+  } catch (error) {
+    forgetTauriPendingCapture(runtime, capture.summary.id);
+    await saveCaptureSilently({
+      ...capture.summary,
+      status: 'failed',
+      errorMessage: formatError(error),
+    });
+    throw error;
+  }
+}
+
 function installTauriNativeLogMonitor(runtime: CacheInspectorMonitorRuntime): void {
   for (const targetWindow of getTargetWindows()) {
     const llmApiLogs = getTauriLlmApiLogsApi(targetWindow);
-    if (!llmApiLogs || runtime.tauriLogApis.has(llmApiLogs)) continue;
+    if (!llmApiLogs) continue;
+    if (runtime.tauriLogApis.has(llmApiLogs)) {
+      pollTauriNativeLogIndexIfNeeded(runtime, targetWindow, llmApiLogs);
+      continue;
+    }
     if (typeof llmApiLogs.getRaw !== 'function') continue;
 
     runtime.tauriLogApis.add(llmApiLogs);
     void startTauriNativeLogMonitor(runtime, targetWindow, llmApiLogs);
   }
+}
+
+function pollTauriNativeLogIndexIfNeeded(
+  runtime: CacheInspectorMonitorRuntime,
+  targetWindow: MonitorWindow,
+  llmApiLogs: TauriLlmApiLogsApi,
+): void {
+  if (!hasTauriLogPollingWork(runtime) || typeof llmApiLogs.index !== 'function') return;
+
+  const now = Date.now();
+  const lastPolledAt = runtime.tauriLogIndexPollTimes.get(llmApiLogs) ?? 0;
+  if (now - lastPolledAt < TAURI_LOG_INDEX_POLL_INTERVAL_MS) return;
+  runtime.tauriLogIndexPollTimes.set(llmApiLogs, now);
+  void pollTauriNativeLogIndex(runtime, targetWindow, llmApiLogs);
+}
+
+async function pollTauriNativeLogIndex(
+  runtime: CacheInspectorMonitorRuntime,
+  targetWindow: MonitorWindow,
+  llmApiLogs: TauriLlmApiLogsApi,
+): Promise<void> {
+  if (typeof llmApiLogs.index !== 'function') return;
+  try {
+    const entries = await llmApiLogs.index({ limit: 50 });
+    for (const entry of entries) {
+      void captureTauriLlmApiLog(runtime, targetWindow, llmApiLogs, entry);
+    }
+  } catch (error) {
+    logDiagnostic(targetWindow, 'debug', '轮询 TauriTavern 原生 LLM 日志索引失败', {
+      error: formatError(error),
+    });
+  }
+}
+
+function hasTauriLogPollingWork(runtime: CacheInspectorMonitorRuntime): boolean {
+  return (
+    runtime.tauriPendingCaptures.length > 0 ||
+    runtime.tauriVisibleResponseFallbackCaptures.length > 0 ||
+    runtime.tauriLogRetryIds.size > 0
+  );
 }
 
 function installTauriInvokeBrokerMonitor(runtime: CacheInspectorMonitorRuntime): void {
@@ -639,12 +958,7 @@ async function startTauriNativeLogMonitor(
       }, true);
     }
 
-    if (typeof llmApiLogs.index === 'function') {
-      const entries = await llmApiLogs.index({ limit: 50 });
-      for (const entry of entries) {
-        void captureTauriLlmApiLog(runtime, targetWindow, llmApiLogs, entry);
-      }
-    }
+    await pollTauriNativeLogIndex(runtime, targetWindow, llmApiLogs);
   } catch (error) {
     runtime.tauriLogApis.delete(llmApiLogs);
     logDiagnostic(targetWindow, 'warn', 'TauriTavern 原生 LLM 日志订阅失败', {
@@ -669,6 +983,7 @@ async function captureTauriLlmApiLog(
     const payload = parseJsonObject(raw.requestRaw ?? '');
     if (!payload || !isChatCompletionPayload(payload)) {
       runtime.tauriLogProcessedIds.add(logId);
+      runtime.tauriLogRetryIds.delete(logId);
       return;
     }
 
@@ -693,6 +1008,7 @@ async function captureTauriLlmApiLog(
         errorMessage: 'TauriTavern 后端请求失败',
       });
       runtime.tauriLogProcessedIds.add(logId);
+      runtime.tauriLogRetryIds.delete(logId);
       return;
     }
 
@@ -702,7 +1018,9 @@ async function captureTauriLlmApiLog(
       await hydrateRecordFromResponseText(capture.summary, raw.responseRaw ?? '');
     }
     runtime.tauriLogProcessedIds.add(logId);
+    runtime.tauriLogRetryIds.delete(logId);
   } catch (error) {
+    runtime.tauriLogRetryIds.add(logId);
     logDiagnostic(targetWindow, 'warn', '读取 TauriTavern 原生 LLM 日志失败', {
       logId,
       error: formatError(error),
@@ -714,25 +1032,63 @@ async function captureTauriLlmApiLog(
 
 function queueTauriPendingCapture(runtime: CacheInspectorMonitorRuntime, capture: PendingCapture): void {
   pruneTauriPendingCaptures(runtime, Date.now());
+  if (runtime.tauriPendingCaptures.some(pendingCapture => pendingCapture.summary.id === capture.summary.id)) return;
+  if (
+    runtime.tauriVisibleResponseFallbackCaptures.some(
+      fallbackCapture => fallbackCapture.summary.id === capture.summary.id,
+    )
+  ) {
+    return;
+  }
   runtime.tauriPendingCaptures.push(capture);
+}
+
+function queueHostPendingCapture(runtime: CacheInspectorMonitorRuntime, capture: PendingCapture): void {
+  pruneHostPendingCaptures(runtime, Date.now());
+  if (runtime.hostPendingCaptures.some(pendingCapture => pendingCapture.summary.id === capture.summary.id)) return;
+  runtime.hostPendingCaptures.push(capture);
+}
+
+function claimHostPendingCapture(
+  runtime: CacheInspectorMonitorRuntime,
+  payload: Record<string, unknown> | null,
+): PendingCapture | null {
+  if (!payload) return null;
+  pruneHostPendingCaptures(runtime, Date.now());
+  const selected = selectMatchingTauriCapture(runtime.hostPendingCaptures, payload, Date.now(), 8_000, true, true);
+  if (!selected) return null;
+  const [capture] = runtime.hostPendingCaptures.splice(selected.index, 1);
+  if (!capture) return null;
+  capture.hostCompletionHandled = true;
+  return capture;
+}
+
+function hasMatchingHostCapture(
+  runtime: CacheInspectorMonitorRuntime,
+  payload: Record<string, unknown> | null,
+): boolean {
+  if (!payload) return false;
+  pruneHostPendingCaptures(runtime, Date.now());
+  return !!selectMatchingTauriCapture(runtime.hostPendingCaptures, payload, Date.now(), 8_000, true, true);
+}
+
+function forgetHostPendingCapture(runtime: CacheInspectorMonitorRuntime, id: string): void {
+  runtime.hostPendingCaptures = runtime.hostPendingCaptures.filter(capture => capture.summary.id !== id);
+}
+
+function pruneHostPendingCaptures(runtime: CacheInspectorMonitorRuntime, now: number): void {
+  const cutoff = now - 30_000;
+  runtime.hostPendingCaptures = runtime.hostPendingCaptures.filter(capture => capture.summary.timestamp >= cutoff);
 }
 
 function findMatchingTauriPendingCapture(
   runtime: CacheInspectorMonitorRuntime,
   payload: Record<string, unknown>,
   completedAt: number,
-  maxAgeMs = 15 * 60 * 1000,
+  maxAgeMs = TAURI_PENDING_CAPTURE_MAX_AGE_MS,
 ): PendingCapture | null {
   pruneTauriPendingCaptures(runtime, completedAt);
-  const model = typeof payload.model === 'string' && payload.model.trim() ? payload.model : '';
-  const payloadMessages = payloadToMessageSnapshots(payload);
-  return runtime.tauriPendingCaptures.find(capture => {
-    if (capture.summary.timestamp < completedAt - maxAgeMs) return false;
-    if (capture.summary.timestamp > completedAt + 30_000) return false;
-    if (model && capture.summary.model !== '当前模型' && capture.summary.model !== model) return false;
-    if (payloadMessages.length === 0 || !capture.snapshot?.messages.length) return true;
-    return promptSnapshotsMatch(capture.snapshot.messages, payloadMessages);
-  }) ?? null;
+  return selectMatchingTauriCapture(runtime.tauriPendingCaptures, payload, completedAt, maxAgeMs)?.capture ?? null;
 }
 
 function claimTauriPendingCapture(
@@ -742,23 +1098,92 @@ function claimTauriPendingCapture(
 ): PendingCapture | null {
   const timestamp = typeof completedAt === 'number' && Number.isFinite(completedAt) ? completedAt : Date.now();
   pruneTauriPendingCaptures(runtime, timestamp);
+  const selectedPending = selectMatchingTauriCapture(
+    runtime.tauriPendingCaptures,
+    payload,
+    timestamp,
+    TAURI_PENDING_CAPTURE_MAX_AGE_MS,
+    true,
+    true,
+  );
+  if (selectedPending) {
+    const [capture] = runtime.tauriPendingCaptures.splice(selectedPending.index, 1);
+    return capture ?? null;
+  }
+
+  const selectedFallback = selectMatchingTauriCapture(
+    runtime.tauriVisibleResponseFallbackCaptures,
+    payload,
+    timestamp,
+    TAURI_VISIBLE_RESPONSE_FALLBACK_TTL_MS,
+    true,
+    true,
+  );
+  if (selectedFallback) {
+    const [capture] = runtime.tauriVisibleResponseFallbackCaptures.splice(selectedFallback.index, 1);
+    return capture ?? null;
+  }
+
+  return null;
+}
+
+function selectMatchingTauriCapture(
+  captures: PendingCapture[],
+  payload: Record<string, unknown>,
+  completedAt: number,
+  maxAgeMs: number,
+  allowSingleLooseFallback = false,
+  allowPromptMismatchFallback = false,
+): { capture: PendingCapture; index: number } | null {
   const model = typeof payload.model === 'string' && payload.model.trim() ? payload.model : '';
-  const eligibleCaptures = runtime.tauriPendingCaptures
+  const payloadMessages = payloadToMessageSnapshots(payload);
+  const eligibleCaptures = captures
     .map((capture, index) => ({ capture, index }))
-    .filter(({ capture }) => {
-      if (capture.summary.timestamp > timestamp + 30_000) return false;
-      return true;
-    });
-  const exactMatch = model
-    ? eligibleCaptures.find(({ capture }) => {
-        if (capture.summary.model === '当前模型') return true;
-        return capture.summary.model === model;
-      })
-    : null;
-  const selected = exactMatch ?? eligibleCaptures[0] ?? null;
-  if (!selected) return null;
-  const [capture] = runtime.tauriPendingCaptures.splice(selected.index, 1);
-  return capture ?? null;
+    .filter(({ capture }) => isTauriCaptureInTimeWindow(capture, completedAt, maxAgeMs));
+  const scored = eligibleCaptures
+    .map(({ capture, index }) =>
+      scoreTauriCaptureMatch(capture, index, model, payloadMessages, completedAt, allowPromptMismatchFallback),
+    )
+    .filter((match): match is { capture: PendingCapture; index: number; score: number; distance: number } => !!match)
+    .sort((left, right) => right.score - left.score || left.distance - right.distance);
+  if (scored[0]) return scored[0];
+  return allowSingleLooseFallback && eligibleCaptures.length === 1 ? eligibleCaptures[0] : null;
+}
+
+function isTauriCaptureInTimeWindow(capture: PendingCapture, completedAt: number, maxAgeMs: number): boolean {
+  if (capture.summary.timestamp < completedAt - maxAgeMs) return false;
+  if (capture.summary.timestamp > completedAt + 30_000) return false;
+  return true;
+}
+
+function scoreTauriCaptureMatch(
+  capture: PendingCapture,
+  index: number,
+  model: string,
+  payloadMessages: PromptMessageSnapshot[],
+  completedAt: number,
+  allowPromptMismatchFallback = false,
+): { capture: PendingCapture; index: number; score: number; distance: number } | null {
+  if (model && capture.summary.model !== '当前模型' && capture.summary.model !== model) return null;
+
+  let score = model && capture.summary.model === model ? 4 : 0;
+  const captureMessages = capture.snapshot?.messages ?? [];
+  if (payloadMessages.length > 0 && captureMessages.length > 0) {
+    if (promptSnapshotsMatch(captureMessages, payloadMessages)) {
+      score += 8;
+    } else if (!allowPromptMismatchFallback) {
+      return null;
+    }
+  } else if (payloadMessages.length === 0 || captureMessages.length === 0) {
+    score += 1;
+  }
+
+  return {
+    capture,
+    index,
+    score,
+    distance: Math.abs(completedAt - capture.summary.timestamp),
+  };
 }
 
 function promptSnapshotsMatch(left: PromptMessageSnapshot[], right: PromptMessageSnapshot[]): boolean {
@@ -776,8 +1201,12 @@ function forgetTauriPendingCapture(runtime: CacheInspectorMonitorRuntime, id: st
 }
 
 function pruneTauriPendingCaptures(runtime: CacheInspectorMonitorRuntime, now: number): void {
-  const cutoff = now - 15 * 60 * 1000;
+  const cutoff = now - TAURI_PENDING_CAPTURE_MAX_AGE_MS;
+  const fallbackCutoff = now - TAURI_VISIBLE_RESPONSE_FALLBACK_TTL_MS;
   runtime.tauriPendingCaptures = runtime.tauriPendingCaptures.filter(capture => capture.summary.timestamp >= cutoff);
+  runtime.tauriVisibleResponseFallbackCaptures = runtime.tauriVisibleResponseFallbackCaptures.filter(
+    capture => (capture.fallbackAt ?? capture.summary.timestamp) >= fallbackCutoff,
+  );
 }
 
 function rebaseCaptureIdentity(capture: PendingCapture, id: string, timestamp: number): void {
@@ -983,6 +1412,9 @@ function isChatCompletionPayload(payload: Record<string, unknown>): boolean {
 function payloadToMessageSnapshots(payload: Record<string, unknown> | null): PromptMessageSnapshot[] {
   if (!payload) return [];
   if (Array.isArray(payload.messages)) return payload.messages.map(messageToSnapshot);
+  if (Array.isArray(payload.ordered_prompts)) {
+    return payload.ordered_prompts.map(messageToSnapshot).filter(snapshot => snapshot.text.length > 0);
+  }
 
   const snapshots: PromptMessageSnapshot[] = [];
   const systemText = messageContentToText(payload.system ?? payload.systemInstruction ?? payload.system_instruction);
@@ -999,6 +1431,61 @@ function payloadToMessageSnapshots(payload: Record<string, unknown> | null): Pro
   }
 
   return snapshots;
+}
+
+function tavernHelperGenerateRawArgsToPayload(args: unknown[]): Record<string, unknown> | null {
+  const options = isRecord(args[0]) ? args[0] : {};
+  const messages = [
+    ...promptLikeToMessages(options.prompt),
+    ...promptLikeToMessages(options.ordered_prompts),
+    ...promptLikeToMessages(options.user_input),
+  ];
+  const customApi = getRecordProperty(options, 'custom_api');
+  const model = firstString(customApi?.model, options.model);
+  return {
+    messages,
+    ...(model ? { model } : {}),
+    stream: Boolean(options.should_stream),
+  };
+}
+
+function connectionManagerSendRequestArgsToPayload(args: unknown[]): Record<string, unknown> | null {
+  const prompt = args[1];
+  const overridePayload = isRecord(args[4]) ? args[4] : {};
+  const model = firstString(overridePayload.model);
+  return {
+    messages: promptLikeToMessages(prompt),
+    ...(model ? { model } : {}),
+    max_tokens: typeof args[2] === 'number' ? args[2] : undefined,
+  };
+}
+
+function serviceProcessRequestArgsToPayload(args: unknown[]): Record<string, unknown> | null {
+  const requestData = isRecord(args[0]) ? args[0] : {};
+  if (Array.isArray(requestData.messages)) return requestData;
+  if (Array.isArray(requestData.prompt) || typeof requestData.prompt === 'string') {
+    return {
+      ...requestData,
+      messages: promptLikeToMessages(requestData.prompt),
+    };
+  }
+  return requestData;
+}
+
+function promptLikeToMessages(value: unknown): Array<{ role: string; content: unknown }> {
+  if (typeof value === 'string') return value ? [{ role: 'user', content: value }] : [];
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(item => {
+      if (typeof item === 'string') return null;
+      if (!isRecord(item)) return null;
+      const content = item.content ?? item.text ?? item.prompt;
+      const text = messageContentToText(content);
+      if (!text) return null;
+      const role = typeof item.role === 'string' ? item.role : 'user';
+      return { role, content: text };
+    })
+    .filter((message): message is { role: string; content: unknown } => !!message);
 }
 
 function messageToSnapshot(message: unknown): PromptMessageSnapshot {
@@ -1196,8 +1683,30 @@ function getEventTargetWindows(): MonitorWindow[] {
   for (const targetWindow of [window, safeRelatedWindow('parent'), safeRelatedWindow('top')]) {
     if (!targetWindow || targets.includes(targetWindow) || !canAccessWindow(targetWindow)) continue;
     targets.push(targetWindow);
+    collectSameOriginEventChildWindows(targetWindow, targets);
   }
   return targets;
+}
+
+function collectSameOriginEventChildWindows(rootWindow: MonitorWindow, targets: MonitorWindow[]): void {
+  let frameElements: Array<{ contentWindow?: Window | null }> = [];
+  try {
+    frameElements = Array.from(rootWindow.document?.querySelectorAll?.('iframe,frame') ?? []);
+  } catch {
+    return;
+  }
+
+  for (const frameElement of frameElements) {
+    let frameWindow: MonitorWindow | null = null;
+    try {
+      frameWindow = frameElement.contentWindow as MonitorWindow | null;
+    } catch {
+      frameWindow = null;
+    }
+    if (!frameWindow || targets.includes(frameWindow) || !canAccessWindow(frameWindow)) continue;
+    targets.push(frameWindow);
+    collectSameOriginEventChildWindows(frameWindow, targets);
+  }
 }
 
 function createRecordsChangedEvent(
@@ -1233,6 +1742,13 @@ function firstRecord(...values: unknown[]): Record<string, unknown> | null {
   return null;
 }
 
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
 function firstNumber(...values: unknown[]): number {
   return firstOptionalNumber(...values) ?? 0;
 }
@@ -1252,6 +1768,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return isRecord(value) && typeof value.then === 'function';
+}
+
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  return isRecord(value) && typeof value[Symbol.asyncIterator] === 'function';
+}
+
 function isRequestLike(value: unknown): value is Request {
   return isRecord(value) && typeof value.url === 'string' && typeof value.clone === 'function';
 }
@@ -1262,15 +1786,80 @@ function getTargetWindows(): MonitorWindow[] {
     if (!targetWindow || targets.includes(targetWindow)) continue;
     if (!canAccessWindow(targetWindow) || !hasCaptureSurface(targetWindow)) continue;
     targets.push(targetWindow);
+    collectSameOriginChildWindows(targetWindow, targets);
   }
   return targets;
+}
+
+function collectSameOriginChildWindows(rootWindow: MonitorWindow, targets: MonitorWindow[]): void {
+  let frameElements: Array<{ contentWindow?: Window | null }> = [];
+  try {
+    frameElements = Array.from(rootWindow.document?.querySelectorAll?.('iframe,frame') ?? []);
+  } catch {
+    return;
+  }
+
+  for (const frameElement of frameElements) {
+    let frameWindow: MonitorWindow | null = null;
+    try {
+      frameWindow = frameElement.contentWindow as MonitorWindow | null;
+    } catch {
+      frameWindow = null;
+    }
+    if (!frameWindow || targets.includes(frameWindow)) continue;
+    if (!canAccessWindow(frameWindow) || !hasCaptureSurface(frameWindow)) continue;
+    targets.push(frameWindow);
+    collectSameOriginChildWindows(frameWindow, targets);
+  }
+}
+
+function getRecordProperty(value: unknown, key: string): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  const property = value[key];
+  return isRecord(property) ? property : null;
+}
+
+function safeGetTavernHelper(targetWindow: MonitorWindow): TavernHelperApi | null {
+  try {
+    const helper = targetWindow.TavernHelper;
+    return isRecord(helper) ? (helper as TavernHelperApi) : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeGetSillyTavernContext(targetWindow: MonitorWindow): Record<string, unknown> | null {
+  try {
+    const tavern = targetWindow.SillyTavern;
+    if (!tavern || typeof tavern.getContext !== 'function') return null;
+    const context = tavern.getContext();
+    return isRecord(context) ? context : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeSetHostFunction(owner: HostFunctionOwner, key: string, nextFunction: HostCaptureFunction): boolean {
+  try {
+    owner[key] = nextFunction;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function restoreHostFunctionPatch(functionPatch: HostFunctionPatch): void {
+  if (functionPatch.owner[functionPatch.key] !== functionPatch.patchedFunction) return;
+  safeSetHostFunction(functionPatch.owner, functionPatch.key, functionPatch.originalFunction);
 }
 
 function hasCaptureSurface(targetWindow: MonitorWindow): boolean {
   return (
     !!safeGetFetch(targetWindow) ||
     getAjaxOwners(targetWindow).some(owner => !!safeGetAjax(owner)) ||
-    !!safeGetXMLHttpRequest(targetWindow)
+    !!safeGetXMLHttpRequest(targetWindow) ||
+    !!safeGetTavernHelper(targetWindow) ||
+    !!safeGetSillyTavernContext(targetWindow)
   );
 }
 
@@ -1362,7 +1951,7 @@ async function callFetchDelegate(
   const delegateFetch = patchState.delegateFetch ?? patchState.bypassFetch ?? targetWindow.fetch.bind(targetWindow);
   patchState.fetchDelegateDepth += 1;
   try {
-    return await delegateFetch(...args);
+    return delegateFetch(...args);
   } finally {
     patchState.fetchDelegateDepth = Math.max(0, patchState.fetchDelegateDepth - 1);
   }
@@ -1508,6 +2097,54 @@ function parseAjaxPayload(data: unknown): Record<string, unknown> | null {
   return null;
 }
 
+function createResponseTextPromise(response: Response): Promise<string> {
+  try {
+    const textPromise = response.clone().text();
+    void textPromise.catch(() => undefined);
+    return textPromise;
+  } catch (error) {
+    const textPromise = Promise.reject(error);
+    void textPromise.catch(() => undefined);
+    return textPromise;
+  }
+}
+
+function scheduleTauriVisibleResponseFallback(
+  runtime: CacheInspectorMonitorRuntime,
+  capture: PendingCapture,
+  responseTextPromise: Promise<string>,
+): void {
+  setTimeout(() => {
+    if (runtime.destroyed) return;
+    const fallbackCapture = moveTauriPendingCaptureToVisibleFallback(runtime, capture.summary.id);
+    if (!fallbackCapture) return;
+
+    void responseTextPromise.then(
+      text => hydrateRecordFromResponseText(fallbackCapture.summary, text),
+      error =>
+        saveCaptureSilently({
+          ...fallbackCapture.summary,
+          status: 'completed',
+          errorMessage: `读取缓存数据失败：${formatError(error)}`,
+        }),
+    );
+  }, TAURI_VISIBLE_RESPONSE_FALLBACK_DELAY_MS);
+}
+
+function moveTauriPendingCaptureToVisibleFallback(
+  runtime: CacheInspectorMonitorRuntime,
+  id: string,
+): PendingCapture | null {
+  const index = runtime.tauriPendingCaptures.findIndex(capture => capture.summary.id === id);
+  if (index < 0) return null;
+  const [capture] = runtime.tauriPendingCaptures.splice(index, 1);
+  if (!capture) return null;
+  capture.fallbackAt = Date.now();
+  pruneTauriPendingCaptures(runtime, capture.fallbackAt);
+  runtime.tauriVisibleResponseFallbackCaptures.push(capture);
+  return capture;
+}
+
 function attachAjaxCompletionHandlers(record: CacheSummaryRecord, result: unknown): void {
   if (!isRecord(result)) return;
 
@@ -1540,31 +2177,43 @@ function attachAjaxCompletionHandlers(record: CacheSummaryRecord, result: unknow
   }
 }
 
-function attachAjaxFailureHandler(
-  record: CacheSummaryRecord,
+function attachAjaxTauriCompletionHandlers(
+  runtime: CacheInspectorMonitorRuntime,
+  capture: PendingCapture,
   result: unknown,
-  beforeSaveFailed?: () => void,
 ): void {
   if (!isRecord(result)) return;
 
   const saveFailed = (message: string): void => {
-    beforeSaveFailed?.();
+    forgetTauriPendingCapture(runtime, capture.summary.id);
     void saveCaptureSilently({
-      ...record,
+      ...capture.summary,
       status: 'failed',
       errorMessage: message,
     });
+  };
+
+  const scheduleFallback = (data: unknown, fallbackText?: string | null): void => {
+    const textPromise =
+      typeof fallbackText === 'string' ? Promise.resolve(fallbackText) : Promise.resolve(safeStringify(data) ?? '');
+    scheduleTauriVisibleResponseFallback(runtime, capture, textPromise);
   };
 
   if (typeof result.fail === 'function') {
     result.fail((jqXHR: unknown, _textStatus: unknown, errorThrown: unknown) => {
       saveFailed(formatAjaxError(jqXHR, errorThrown));
     });
+  }
+
+  if (typeof result.done === 'function') {
+    result.done((data: unknown, _textStatus: unknown, jqXHR: unknown) => {
+      scheduleFallback(data, ajaxResponseText(jqXHR));
+    });
     return;
   }
 
   if (typeof result.then === 'function') {
-    void Promise.resolve(result).catch(error => saveFailed(formatError(error)));
+    void Promise.resolve(result).then(value => scheduleFallback(value), error => saveFailed(formatError(error)));
   }
 }
 
@@ -1578,10 +2227,6 @@ function getTauriReadyPromise(): PromiseLike<unknown> | null {
     if (isPromiseLike(readyPromise)) return readyPromise;
   }
   return null;
-}
-
-function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
-  return isRecord(value) && typeof value.then === 'function';
 }
 
 function installDiagnostics(runtime: CacheInspectorMonitorRuntime, targetWindow: MonitorWindow): void {

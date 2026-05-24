@@ -19,5 +19,6 @@
 
 - 不要使用自动推导版本号的 GitHub Actions 自动打标；版本号以 `src/世界书管理器/App.vue` 的 `APP_VERSION` 为准。
 - 发布时先把 `APP_VERSION` 改为目标 tag（例如 `v3.10`），完成验证后执行 `I:\SillyTavern_Helper\一键更新世界书管理器.bat` 推送源码并等待 `[bot] bundle`。
+- 更新云端必须使用 `I:\SillyTavern_Helper\一键更新世界书管理器.bat`，不要手动 `git push` 到远端。
 - 目标 tag 和 GitHub Release 必须指向 `[bot] bundle` commit；不要把 tag 指到源码提交，也不要留下 `v0.0.x` 这类自动生成 tag。
 - 发布后确认 `releases/latest` 返回目标版本，并确认目标 tag 下存在 `dist/世界书管理器/index.js`。

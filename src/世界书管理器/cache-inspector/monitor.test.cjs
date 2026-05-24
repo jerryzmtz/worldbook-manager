@@ -11,6 +11,8 @@ const { CACHE_RECORDS_CHANGED_EVENT, installCacheInspectorMonitor } = require('.
 
 const TARGET_API = '/api/backends/chat-completions/generate';
 let originalFetch;
+let originalConsoleInfo;
+let originalConsoleWarn;
 
 test('captures normal SillyTavern fetch requests', async () => {
   let resolveFetch;
@@ -466,6 +468,168 @@ test('captures XMLHttpRequest requests when the host bypasses fetch and jQuery a
   }
 });
 
+test('captures TavernHelper.generateRaw requests even when no fetch is visible', async () => {
+  let fetchCalls = 0;
+  const { stores } = installTestEnvironment(async () => {
+    fetchCalls += 1;
+    return new Response('{}');
+  });
+  window.TavernHelper = {
+    generateRaw: async options => {
+      assert.equal(options.should_stream, false);
+      return 'table edit result';
+    },
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    const result = await window.TavernHelper.generateRaw({
+      ordered_prompts: [
+        { role: 'system', content: 'database fill system prompt' },
+        { role: 'user', content: 'current table data' },
+      ],
+      should_stream: false,
+    });
+    await flushAsyncWork();
+
+    assert.equal(result, 'table edit result');
+    assert.equal(fetchCalls, 0);
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.messageCount, 2);
+    assert.equal(summary.promptChars, 'database fill system prompt'.length + 'current table data'.length);
+    assert.equal(summary.errorMessage, '未返回缓存数据');
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('hydrates TavernHelper.generateRaw captures from nested fetch usage without duplicating records', async () => {
+  const { stores } = installTestEnvironment(async () => {
+    return new Response(JSON.stringify({
+      usage: {
+        prompt_tokens_details: { cached_tokens: 6 },
+        prompt_tokens: 10,
+        completion_tokens: 3,
+        total_tokens: 13,
+      },
+    }));
+  });
+  window.TavernHelper = {
+    generateRaw: async options => {
+      await window.fetch(TARGET_API, {
+        method: 'POST',
+        body: JSON.stringify({
+          model: 'nested-fetch-model',
+          messages: options.ordered_prompts,
+        }),
+      });
+      return 'nested result';
+    },
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    const result = await window.TavernHelper.generateRaw({
+      ordered_prompts: [
+        { role: 'system', content: 'database nested system prompt' },
+        { role: 'user', content: 'database nested table data' },
+      ],
+    });
+    await flushAsyncWork();
+
+    assert.equal(result, 'nested result');
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, '当前模型');
+    assert.equal(summary.hitTokens, 6);
+    assert.equal(summary.totalTokens, 13);
+    assert.equal(summary.errorMessage, null);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('captures ConnectionManagerRequestService requests when no fetch is visible', async () => {
+  const context = {
+    ConnectionManagerRequestService: {
+      sendRequest: async (_profileId, prompt) => {
+        assert.equal(prompt[0].content, 'connection manager prompt');
+        return { content: 'connection manager result' };
+      },
+    },
+  };
+  const { stores } = installTestEnvironment(async () => new Response('{}'));
+  window.SillyTavern = {
+    getContext: () => context,
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    const result = await context.ConnectionManagerRequestService.sendRequest(
+      'profile-id',
+      [{ role: 'user', content: 'connection manager prompt' }],
+      1024,
+    );
+    await flushAsyncWork();
+
+    assert.deepEqual(result, { content: 'connection manager result' });
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.messageCount, 1);
+    assert.equal(summary.promptChars, 'connection manager prompt'.length);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('captures TavernHelper.generateRaw requests from same-origin sibling iframes', async () => {
+  const { stores } = installTestEnvironment(async () => new Response('{}'));
+  const siblingWindow = {
+    location: { href: 'http://localhost/scripts/extensions/third-party/database/' },
+    dispatchEvent: () => true,
+    TavernHelper: {
+      generateRaw: async options => {
+        assert.equal(options.ordered_prompts[0].content, 'iframe database prompt');
+        return 'iframe table result';
+      },
+    },
+  };
+  siblingWindow.parent = window;
+  siblingWindow.top = window;
+  siblingWindow.document = { querySelectorAll: () => [] };
+  window.document = {
+    querySelectorAll: selector => {
+      assert.equal(selector, 'iframe,frame');
+      return [{ contentWindow: siblingWindow }];
+    },
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    const result = await siblingWindow.TavernHelper.generateRaw({
+      ordered_prompts: [{ role: 'user', content: 'iframe database prompt' }],
+    });
+    await flushAsyncWork();
+
+    assert.equal(result, 'iframe table result');
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.messageCount, 1);
+    assert.equal(summary.promptChars, 'iframe database prompt'.length);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
 test('captures TauriTavern native LLM API logs without relying on fetch patching', async () => {
   let subscriber = null;
   const rawEntries = new Map();
@@ -561,6 +725,252 @@ test('captures TauriTavern native LLM API logs without relying on fetch patching
     assert.equal(summary.hitTokens, 8);
     assert.equal(summary.totalTokens, 25);
     assert.equal(stores.promptSnapshots.size, 1);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('falls back to visible SillyTavern fetch responses when native logs do not arrive', async () => {
+  let subscriber = null;
+  const rawEntries = new Map();
+  const payload = {
+    model: 'st-visible-response-model',
+    messages: [{ role: 'user', content: 'visible response should complete pending' }],
+  };
+  const { stores } = installTestEnvironment(async () => {
+    return new Response(JSON.stringify({
+      usage: {
+        prompt_tokens_details: { cached_tokens: 4 },
+        prompt_tokens: 10,
+        completion_tokens: 2,
+        total_tokens: 12,
+      },
+    }));
+  });
+  window.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    api: {
+      dev: {
+        llmApiLogs: {
+          index: async () => [],
+          getRaw: async id => rawEntries.get(id),
+          subscribeIndex: async handler => {
+            subscriber = handler;
+            return () => {};
+          },
+        },
+      },
+    },
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    await flushAsyncWork();
+    assert.equal(typeof subscriber, 'function');
+
+    await window.fetch(TARGET_API, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    await wait(650);
+    await flushAsyncWork();
+
+    assert.equal(stores.summaryRecords.size, 1);
+    const [fallbackSummary] = stores.summaryRecords.values();
+    assert.equal(fallbackSummary.status, 'completed');
+    assert.equal(fallbackSummary.model, 'st-visible-response-model');
+    assert.equal(fallbackSummary.hitTokens, 4);
+    const fallbackId = fallbackSummary.id;
+
+    rawEntries.set(21, {
+      id: 21,
+      requestRaw: JSON.stringify(payload),
+      responseRaw: JSON.stringify({
+        usage: {
+          prompt_tokens_details: { cached_tokens: 9 },
+          prompt_tokens: 10,
+          completion_tokens: 2,
+          total_tokens: 12,
+        },
+      }),
+      responseRawKind: 'json',
+    });
+    subscriber({ id: 21, timestampMs: Date.now(), ok: true, stream: true });
+    await flushAsyncWork();
+
+    assert.equal(stores.summaryRecords.size, 1);
+    const [nativeSummary] = stores.summaryRecords.values();
+    assert.equal(nativeSummary.id, fallbackId);
+    assert.equal(nativeSummary.status, 'completed');
+    assert.equal(nativeSummary.hitTokens, 9);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('matches TauriTavern native logs to the correct concurrent pending request', async () => {
+  let subscriber = null;
+  const rawEntries = new Map();
+  const fetchResolvers = [];
+  const { stores } = installTestEnvironment(async () => {
+    return new Promise(resolve => {
+      fetchResolvers.push(resolve);
+    });
+  });
+  window.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    api: {
+      dev: {
+        llmApiLogs: {
+          index: async () => [],
+          getRaw: async id => rawEntries.get(id),
+          subscribeIndex: async handler => {
+            subscriber = handler;
+            return () => {};
+          },
+        },
+      },
+    },
+  };
+  const firstPayload = {
+    model: 'same-model',
+    messages: [{ role: 'user', content: 'first short payload' }],
+  };
+  const secondPayload = {
+    model: 'same-model',
+    messages: [{ role: 'user', content: 'second longer payload should win native log matching' }],
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    await flushAsyncWork();
+    const firstFetch = window.fetch(TARGET_API, { method: 'POST', body: JSON.stringify(firstPayload) });
+    const secondFetch = window.fetch(TARGET_API, { method: 'POST', body: JSON.stringify(secondPayload) });
+    await flushAsyncWork();
+
+    assert.equal(stores.summaryRecords.size, 2);
+    const pendingSummaries = Array.from(stores.summaryRecords.values());
+    const firstPending = pendingSummaries.find(summary => summary.promptChars === 'first short payload'.length);
+    const secondPending = pendingSummaries.find(
+      summary => summary.promptChars === 'second longer payload should win native log matching'.length,
+    );
+    assert.ok(firstPending);
+    assert.ok(secondPending);
+
+    rawEntries.set(31, {
+      id: 31,
+      requestRaw: JSON.stringify(secondPayload),
+      responseRaw: JSON.stringify({
+        usage: {
+          prompt_tokens_details: { cached_tokens: 12 },
+          prompt_tokens: 20,
+          completion_tokens: 4,
+          total_tokens: 24,
+        },
+      }),
+      responseRawKind: 'json',
+    });
+    subscriber({ id: 31, timestampMs: Date.now(), ok: true, stream: false });
+    await flushAsyncWork();
+
+    const firstAfterLog = stores.summaryRecords.get(firstPending.id);
+    const secondAfterLog = stores.summaryRecords.get(secondPending.id);
+    assert.equal(firstAfterLog.status, 'pending');
+    assert.equal(secondAfterLog.status, 'completed');
+    assert.equal(secondAfterLog.hitTokens, 12);
+
+    fetchResolvers.forEach(resolve =>
+      resolve(new Response(JSON.stringify({ usage: { prompt_tokens: 1, total_tokens: 1 } }))),
+    );
+    await Promise.all([firstFetch, secondFetch]);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('loosely claims the nearest TauriTavern native log when transformed payloads differ', async () => {
+  let subscriber = null;
+  const rawEntries = new Map();
+  const fetchResolvers = [];
+  const { stores } = installTestEnvironment(async () => {
+    return new Promise(resolve => {
+      fetchResolvers.push(resolve);
+    });
+  });
+  window.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    api: {
+      dev: {
+        llmApiLogs: {
+          index: async () => [],
+          getRaw: async id => rawEntries.get(id),
+          subscribeIndex: async handler => {
+            subscriber = handler;
+            return () => {};
+          },
+        },
+      },
+    },
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    await flushAsyncWork();
+    const firstFetch = window.fetch(TARGET_API, {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'same-native-model',
+        messages: [{ role: 'user', content: 'browser first prompt' }],
+      }),
+    });
+    await wait(5);
+    const secondFetch = window.fetch(TARGET_API, {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'same-native-model',
+        messages: [{ role: 'user', content: 'browser second prompt' }],
+      }),
+    });
+    await wait(10);
+    await flushAsyncWork();
+
+    const pendingSummaries = Array.from(stores.summaryRecords.values());
+    const firstPending = pendingSummaries.find(summary => summary.promptChars === 'browser first prompt'.length);
+    const secondPending = pendingSummaries.find(summary => summary.promptChars === 'browser second prompt'.length);
+    assert.ok(firstPending, JSON.stringify(pendingSummaries));
+    assert.ok(secondPending, JSON.stringify(pendingSummaries));
+
+    rawEntries.set(41, {
+      id: 41,
+      requestRaw: JSON.stringify({
+        model: 'same-native-model',
+        messages: [{ role: 'user', content: 'native transformed prompt text' }],
+      }),
+      responseRaw: JSON.stringify({
+        usage: {
+          prompt_tokens_details: { cached_tokens: 16 },
+          prompt_tokens: 20,
+          completion_tokens: 3,
+          total_tokens: 23,
+        },
+      }),
+      responseRawKind: 'json',
+    });
+    subscriber({ id: 41, timestampMs: Date.now(), ok: true, stream: true });
+    await flushAsyncWork();
+
+    assert.equal(stores.summaryRecords.get(firstPending.id).status, 'pending');
+    const secondAfterLog = stores.summaryRecords.get(secondPending.id);
+    assert.equal(secondAfterLog.status, 'completed');
+    assert.equal(secondAfterLog.hitTokens, 16);
+
+    fetchResolvers.forEach(resolve =>
+      resolve(new Response(JSON.stringify({ usage: { prompt_tokens: 1, total_tokens: 1 } }))),
+    );
+    await Promise.all([firstFetch, secondFetch]);
   } finally {
     handle.destroy();
     cleanupTestEnvironment();
@@ -713,8 +1123,104 @@ test('retries TauriTavern native raw log reads because the event can arrive befo
   }
 });
 
+test('keeps polling TauriTavern native log index while raw files are late', async () => {
+  let subscriber = null;
+  let rawReady = false;
+  let rawAttempts = 0;
+  let indexCalls = 0;
+  let resolveInvoke;
+  const invokeResult = new Promise(resolve => {
+    resolveInvoke = resolve;
+  });
+  const payload = {
+    model: 'late-native-log-model',
+    stream: true,
+    messages: [{ role: 'user', content: 'late native raw payload' }],
+  };
+  const { stores } = installTestEnvironment(async () => new Response('{}'));
+  window.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    invoke: {
+      broker: {
+        invoke: async () => invokeResult,
+      },
+    },
+    api: {
+      dev: {
+        llmApiLogs: {
+          index: async () => {
+            indexCalls += 1;
+            return [{ id: 9, timestampMs: Date.now(), ok: true, stream: true }];
+          },
+          getRaw: async id => {
+            rawAttempts += 1;
+            if (!rawReady) throw new Error(`raw ${id} not ready yet`);
+            return {
+              id,
+              requestRaw: JSON.stringify(payload),
+              responseRaw: [
+                'data: {"choices":[{"delta":{"content":"ok"}}]}',
+                'data: {"usage":{"prompt_cache_hit_tokens":21,"prompt_tokens":30,"completion_tokens":5,"total_tokens":35}}',
+                'data: [DONE]',
+              ].join('\n'),
+              responseRawKind: 'sse',
+            };
+          },
+          subscribeIndex: async handler => {
+            subscriber = handler;
+            return () => {};
+          },
+        },
+      },
+    },
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    await flushAsyncWork();
+    assert.equal(typeof subscriber, 'function');
+
+    const startPromise = window.__TAURITAVERN__.invoke.broker.invoke('start_chat_completion_stream', {
+      streamId: 'late-stream',
+      dto: payload,
+    });
+    await flushAsyncWork();
+
+    const [pendingSummary] = stores.summaryRecords.values();
+    assert.equal(pendingSummary.status, 'pending');
+    const pendingId = pendingSummary.id;
+
+    resolveInvoke({ started: true });
+    await startPromise;
+    subscriber({ id: 9, timestampMs: Date.now(), ok: true, stream: true });
+
+    await wait(2800);
+    await flushAsyncWork();
+    assert.equal(stores.summaryRecords.get(pendingId).status, 'pending');
+
+    rawReady = true;
+    await wait(2200);
+    await flushAsyncWork();
+
+    const summary = stores.summaryRecords.get(pendingId);
+    assert.ok(indexCalls >= 2);
+    assert.ok(rawAttempts >= 2);
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'late-native-log-model');
+    assert.equal(summary.hitTokens, 21);
+    assert.equal(summary.totalTokens, 35);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
 function installTestEnvironment(fetchImpl) {
   originalFetch = globalThis.fetch;
+  originalConsoleInfo = console.info;
+  originalConsoleWarn = console.warn;
+  console.info = () => {};
+  console.warn = () => {};
   globalThis.fetch = async url => {
     if (String(url).includes('frankfurter') || String(url).includes('open.er-api')) {
       return new Response(JSON.stringify({ rates: { CNY: 6.8032 } }));
@@ -752,6 +1258,10 @@ function installJQueryAjaxMock(ajaxImpl) {
 function cleanupTestEnvironment() {
   globalThis.fetch = originalFetch;
   originalFetch = undefined;
+  console.info = originalConsoleInfo;
+  console.warn = originalConsoleWarn;
+  originalConsoleInfo = undefined;
+  originalConsoleWarn = undefined;
   delete globalThis.window;
   delete globalThis.indexedDB;
   delete globalThis.CustomEvent;

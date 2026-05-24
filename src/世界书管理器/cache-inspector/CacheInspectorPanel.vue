@@ -444,6 +444,7 @@ const CHART_TOP = 12;
 const CHART_BASELINE = 116;
 const CHART_LEFT = 12;
 const CHART_RIGHT = 308;
+const PENDING_RECORD_REFRESH_DELAY_MS = 1500;
 
 type BarMark = {
   id: string;
@@ -494,6 +495,8 @@ const fullText = reactive({
   afterLimit: 0,
   token: 0,
 });
+let pendingRecordsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingRecordsRefreshRunning = false;
 
 const modelOptions = computed(() => {
   const models = new Set(records.value.map(record => record.model).filter(Boolean));
@@ -588,6 +591,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  clearPendingRecordsRefreshTimer();
   window.removeEventListener(CACHE_RECORDS_CHANGED_EVENT, handleRecordsChanged as EventListener);
   window.removeEventListener(EXCHANGE_RATE_UPDATED_EVENT, handleExchangeRateUpdated as EventListener);
   window.visualViewport?.removeEventListener('resize', handleCacheModalViewportChange);
@@ -605,6 +609,7 @@ watch([usageChartOpen, clearConfirmOpen], ([isUsageChartOpen, isClearConfirmOpen
 });
 
 async function refreshRecords(): Promise<void> {
+  clearPendingRecordsRefreshTimer();
   isLoading.value = true;
   loadError.value = '';
   try {
@@ -614,6 +619,7 @@ async function refreshRecords(): Promise<void> {
     loadError.value = `读取缓存记录失败：${formatError(error)}`;
   } finally {
     isLoading.value = false;
+    schedulePendingRecordsRefresh();
   }
 }
 
@@ -643,6 +649,7 @@ async function confirmClearRecords(): Promise<void> {
   try {
     await clearCacheRecords();
     records.value = [];
+    clearPendingRecordsRefreshTimer();
     snapshotCache.clear();
     snapshotLoadingIds.clear();
     selectedBeforeId.value = null;
@@ -663,11 +670,12 @@ function upsertRecord(summary: CacheSummaryRecord): void {
   if (existingIndex >= 0) {
     const nextRecords = records.value.slice();
     nextRecords[existingIndex] = nextRecord;
-    records.value = nextRecords.sort((left, right) => right.timestamp - left.timestamp);
+    records.value = nextRecords.sort(sortRecordsByTimestampDesc);
   } else {
-    records.value = [nextRecord, ...records.value].sort((left, right) => right.timestamp - left.timestamp);
+    records.value = [nextRecord, ...records.value].sort(sortRecordsByTimestampDesc);
   }
   pruneSelection();
+  schedulePendingRecordsRefresh();
 }
 
 function handleRecordsChanged(event: CacheRecordsChangedEvent): void {
@@ -690,6 +698,58 @@ function scheduleCacheModalViewportSync(): void {
   void nextTick(() => {
     syncCacheModalViewport();
   });
+}
+
+function hasPendingRecords(): boolean {
+  return records.value.some(record => record.status === 'pending');
+}
+
+function schedulePendingRecordsRefresh(): void {
+  if (pendingRecordsRefreshTimer !== null || isClearing.value || !hasPendingRecords()) return;
+  pendingRecordsRefreshTimer = setTimeout(() => {
+    pendingRecordsRefreshTimer = null;
+    void refreshPendingRecordsFromStorage();
+  }, PENDING_RECORD_REFRESH_DELAY_MS);
+}
+
+function clearPendingRecordsRefreshTimer(): void {
+  if (pendingRecordsRefreshTimer === null) return;
+  clearTimeout(pendingRecordsRefreshTimer);
+  pendingRecordsRefreshTimer = null;
+}
+
+async function refreshPendingRecordsFromStorage(): Promise<void> {
+  if (pendingRecordsRefreshRunning || isLoading.value || isClearing.value) {
+    schedulePendingRecordsRefresh();
+    return;
+  }
+  if (!hasPendingRecords()) return;
+
+  pendingRecordsRefreshRunning = true;
+  try {
+    records.value = mergeStoredCacheSummaries(records.value, await listCacheSummaries());
+    pruneSelection();
+  } catch {
+    // 后台补偿刷新失败不打断面板；pending 仍存在时会继续尝试。
+  } finally {
+    pendingRecordsRefreshRunning = false;
+    schedulePendingRecordsRefresh();
+  }
+}
+
+function mergeStoredCacheSummaries(
+  currentRecords: CacheSummaryRecord[],
+  storedRecords: CacheSummaryRecord[],
+): CacheSummaryRecord[] {
+  const nextRecordsById = new Map(currentRecords.map(record => [record.id, record]));
+  for (const record of storedRecords) {
+    nextRecordsById.set(record.id, { ...record });
+  }
+  return Array.from(nextRecordsById.values()).sort(sortRecordsByTimestampDesc);
+}
+
+function sortRecordsByTimestampDesc(left: CacheSummaryRecord, right: CacheSummaryRecord): number {
+  return right.timestamp - left.timestamp;
 }
 
 function syncCacheModalViewport(): void {
