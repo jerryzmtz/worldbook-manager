@@ -862,6 +862,200 @@ test('captures TauriTavern native LLM API logs without relying on fetch patching
   }
 });
 
+test('captures TauriTavern native logs in lightweight mode without request hooks', async () => {
+  let subscriber = null;
+  const rawEntries = new Map();
+  const fetchImpl = async () => new Response('{}');
+  const invokeImpl = async () => ({ ok: true });
+  const { stores } = installTestEnvironment(fetchImpl);
+  window.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    invoke: {
+      broker: {
+        invoke: invokeImpl,
+      },
+    },
+    api: {
+      dev: {
+        llmApiLogs: {
+          index: async () => [],
+          getRaw: async id => rawEntries.get(id),
+          subscribeIndex: async handler => {
+            subscriber = handler;
+            return () => {};
+          },
+        },
+      },
+    },
+  };
+  const handle = installCacheInspectorMonitor({
+    captureBrowserRequestHooks: false,
+    captureTauriInvokeBroker: false,
+    captureTauriVisibleResponseFallback: false,
+  });
+
+  try {
+    await flushAsyncWork();
+    assert.equal(typeof subscriber, 'function');
+    assert.equal(window.fetch, fetchImpl);
+    assert.equal(window.__TAURITAVERN__.invoke.broker.invoke, invokeImpl);
+
+    rawEntries.set(1, {
+      id: 1,
+      requestRaw: JSON.stringify({
+        model: 'native-only-model',
+        messages: [{ role: 'user', content: 'native only should still capture' }],
+      }),
+      responseRaw: JSON.stringify({
+        usage: {
+          prompt_tokens_details: { cached_tokens: 9 },
+          prompt_tokens: 30,
+          completion_tokens: 4,
+          total_tokens: 34,
+        },
+      }),
+      responseRawKind: 'json',
+    });
+
+    subscriber({
+      id: 1,
+      timestampMs: Date.now(),
+      ok: true,
+      source: 'openai',
+      model: 'native-only-model',
+      endpoint: 'https://example.test/v1/chat/completions',
+      stream: false,
+    });
+    await flushAsyncWork();
+
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'native-only-model');
+    assert.equal(summary.messageCount, 1);
+    assert.equal(summary.hitTokens, 9);
+    assert.equal(summary.totalTokens, 34);
+    assert.equal(stores.promptSnapshots.size, 1);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('does not touch request hook surfaces in TauriTavern lightweight mode', async () => {
+  let subscriber = null;
+  const rawEntries = new Map();
+  const hookTouches = [];
+  const fetchImpl = async () => new Response('{}');
+  const ajaxImpl = async () => ({});
+  const xhrImpl = function XMLHttpRequestMock() {};
+  const invokeImpl = async () => ({ ok: true });
+  const { stores } = installTestEnvironment(fetchImpl);
+  const jqueryProxy = new Proxy({ ajax: ajaxImpl }, {
+    defineProperty(target, property, descriptor) {
+      if (property === 'ajax') hookTouches.push(`define:${String(property)}`);
+      return Reflect.defineProperty(target, property, descriptor);
+    },
+    set(target, property, value, receiver) {
+      if (property === 'ajax') hookTouches.push(`set:${String(property)}`);
+      return Reflect.set(target, property, value, receiver);
+    },
+  });
+  const windowTarget = {
+    ...window,
+    $: jqueryProxy,
+    jQuery: jqueryProxy,
+    XMLHttpRequest: xhrImpl,
+    __TAURITAVERN__: {
+      ready: Promise.resolve(),
+      invoke: {
+        broker: {
+          invoke: invokeImpl,
+        },
+      },
+      api: {
+        dev: {
+          llmApiLogs: {
+            index: async () => [],
+            getRaw: async id => rawEntries.get(id),
+            subscribeIndex: async handler => {
+              subscriber = handler;
+              return () => {};
+            },
+          },
+        },
+      },
+    },
+  };
+  const windowProxy = new Proxy(windowTarget, {
+    defineProperty(target, property, descriptor) {
+      if (property === 'fetch' || property === 'XMLHttpRequest') hookTouches.push(`define:${String(property)}`);
+      return Reflect.defineProperty(target, property, descriptor);
+    },
+    set(target, property, value, receiver) {
+      if (property === 'fetch' || property === 'XMLHttpRequest') hookTouches.push(`set:${String(property)}`);
+      return Reflect.set(target, property, value, receiver);
+    },
+  });
+  windowProxy.parent = windowProxy;
+  windowProxy.top = windowProxy;
+  globalThis.window = windowProxy;
+
+  const handle = installCacheInspectorMonitor({
+    captureBrowserRequestHooks: false,
+    captureTauriInvokeBroker: false,
+    captureTauriVisibleResponseFallback: false,
+  });
+
+  try {
+    await flushAsyncWork();
+    assert.deepEqual(hookTouches, []);
+    assert.equal(window.fetch, fetchImpl);
+    assert.equal(window.$.ajax, ajaxImpl);
+    assert.equal(window.XMLHttpRequest, xhrImpl);
+    assert.equal(window.__TAURITAVERN__.invoke.broker.invoke, invokeImpl);
+    assert.equal(typeof subscriber, 'function');
+
+    rawEntries.set(1, {
+      id: 1,
+      requestRaw: JSON.stringify({
+        model: 'native-only-no-hooks-model',
+        messages: [{ role: 'user', content: 'native only no hook touch' }],
+      }),
+      responseRaw: JSON.stringify({
+        usage: {
+          prompt_tokens_details: { cached_tokens: 11 },
+          prompt_tokens: 40,
+          total_tokens: 40,
+        },
+      }),
+      responseRawKind: 'json',
+    });
+
+    subscriber({
+      id: 1,
+      timestampMs: Date.now(),
+      ok: true,
+      source: 'openai',
+      model: 'native-only-no-hooks-model',
+      endpoint: 'https://example.test/v1/chat/completions',
+      stream: false,
+    });
+    await flushAsyncWork();
+
+    assert.deepEqual(hookTouches, []);
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'native-only-no-hooks-model');
+    assert.equal(summary.hitTokens, 11);
+    assert.equal(summary.totalTokens, 40);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
 test('does not install SillyTavern host-function patches inside TauriTavern', async () => {
   let helperCalls = 0;
   let serviceCalls = 0;

@@ -145,6 +145,8 @@ type CacheInspectorPatchState = {
 type CacheInspectorMonitorRuntime = {
   destroyed: boolean;
   captureTauriVisibleResponseFallback: boolean;
+  captureBrowserRequestHooks: boolean;
+  captureTauriInvokeBroker: boolean;
   requestCounter: number;
   targetWindows: Set<MonitorWindow>;
   readyPromise: PromiseLike<unknown> | null;
@@ -213,6 +215,8 @@ export type CacheInspectorMonitorHandle = {
 
 export type CacheInspectorMonitorOptions = {
   captureTauriVisibleResponseFallback?: boolean;
+  captureBrowserRequestHooks?: boolean;
+  captureTauriInvokeBroker?: boolean;
 };
 
 export function cleanupCacheInspectorMonitorPatches(): void {
@@ -225,6 +229,8 @@ export function installCacheInspectorMonitor(options: CacheInspectorMonitorOptio
   const runtime: CacheInspectorMonitorRuntime = {
     destroyed: false,
     captureTauriVisibleResponseFallback: options.captureTauriVisibleResponseFallback ?? true,
+    captureBrowserRequestHooks: options.captureBrowserRequestHooks ?? true,
+    captureTauriInvokeBroker: options.captureTauriInvokeBroker ?? true,
     requestCounter: 0,
     targetWindows: new Set(),
     readyPromise: null,
@@ -256,10 +262,16 @@ export function installCacheInspectorMonitor(options: CacheInspectorMonitorOptio
     }
     for (const targetWindow of targetWindows) {
       retainTargetWindow(runtime, targetWindow);
-      patchTargetWindow(runtime, targetWindow);
+      if (runtime.captureBrowserRequestHooks) {
+        patchTargetWindow(runtime, targetWindow);
+      } else {
+        installDiagnostics(runtime, targetWindow);
+      }
     }
     installTauriNativeLogMonitor(runtime);
-    installTauriInvokeBrokerMonitor(runtime);
+    if (runtime.captureTauriInvokeBroker) {
+      installTauriInvokeBrokerMonitor(runtime);
+    }
   };
 
   installTargets();

@@ -124,7 +124,12 @@ function getCacheInspectorMonitorOptions(): CacheInspectorMonitorOptions | null 
       `[缓存命中对比] iOS WebView 关闭 TauriTavern 可见响应 fallback，以避免读取流式响应体。需要强制启用可设置 localStorage.${IOS_CACHE_TAURI_FALLBACK_STORAGE_KEY} = '1'。`,
     );
   }
-  return { captureTauriVisibleResponseFallback };
+  console.warn('[缓存命中对比] iOS WebView 使用 TauriTavern 原生日志轻量捕获，跳过 fetch/ajax/XHR 请求 hook。');
+  return {
+    captureBrowserRequestHooks: false,
+    captureTauriInvokeBroker: false,
+    captureTauriVisibleResponseFallback,
+  };
 }
 
 function isIOSWebViewLikeRuntime(): boolean {
