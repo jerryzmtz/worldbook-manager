@@ -15,7 +15,7 @@ let originalConsoleInfo;
 let originalConsoleWarn;
 let originalConsoleLog;
 
-test('captures normal SillyTavern fetch requests', async () => {
+test('captures normal SillyTavern fetch requests after completion', async () => {
   let resolveFetch;
   const routeResponse = new Promise(resolve => {
     resolveFetch = resolve;
@@ -49,26 +49,20 @@ test('captures normal SillyTavern fetch requests', async () => {
     });
     await flushAsyncWork();
 
-    assert.equal(changedEvents[0]?.summary?.status, 'pending');
-    assert.equal(changedEvents[0]?.summary?.model, 'test-model');
-    assert.equal(stores.summaryRecords.size, 1);
-    const [pendingSummary] = stores.summaryRecords.values();
-    assert.equal(pendingSummary.status, 'pending');
-    assert.equal(pendingSummary.model, 'test-model');
-    const pendingId = pendingSummary.id;
+    assert.equal(changedEvents.length, 0);
+    assert.equal(stores.summaryRecords.size, 0);
     resolveFetch(completedRouteResponse());
     await fetchPromise;
     await flushAsyncWork();
 
     assert.equal(stores.summaryRecords.size, 1);
     const [summary] = stores.summaryRecords.values();
-    assert.equal(summary.id, pendingId);
     assert.equal(summary.status, 'completed');
     assert.equal(summary.model, 'test-model');
     assert.equal(summary.messageCount, 1);
     assert.equal(summary.hitTokens, 7);
     assert.equal(summary.totalTokens, 25);
-    assert.ok(changedEvents.some(event => event.summary?.status === 'completed' && event.summary.id === pendingId));
+    assert.ok(changedEvents.some(event => event.summary?.status === 'completed' && event.summary.id === summary.id));
     assert.equal(stores.promptSnapshots.size, 1);
   } finally {
     handle.destroy();
@@ -76,7 +70,7 @@ test('captures normal SillyTavern fetch requests', async () => {
   }
 });
 
-test('broadcasts pending record changes to same-origin parent windows', async () => {
+test('broadcasts completed record changes to same-origin parent windows', async () => {
   let resolveFetch;
   const routeResponse = new Promise(resolve => {
     resolveFetch = resolve;
@@ -106,19 +100,22 @@ test('broadcasts pending record changes to same-origin parent windows', async ()
     });
     await flushAsyncWork();
 
-    assert.equal(parentEvents[0]?.summary?.status, 'pending');
-    assert.equal(parentEvents[0]?.summary?.model, 'parent-event-model');
+    assert.equal(parentEvents.length, 0);
     resolveFetch(new Response(JSON.stringify({ usage: { prompt_tokens: 1, total_tokens: 1 } })));
     await fetchPromise;
     await flushAsyncWork();
-    assert.ok(parentEvents.some(event => event.summary?.status === 'completed'));
+    assert.ok(
+      parentEvents.some(
+        event => event.summary?.status === 'completed' && event.summary?.model === 'parent-event-model',
+      ),
+    );
   } finally {
     handle.destroy();
     cleanupTestEnvironment();
   }
 });
 
-test('broadcasts host-window captures back to the panel window', async () => {
+test('broadcasts completed host-window captures back to the panel window', async () => {
   let resolveFetch;
   const routeResponse = new Promise(resolve => {
     resolveFetch = resolve;
@@ -149,12 +146,13 @@ test('broadcasts host-window captures back to the panel window', async () => {
     });
     await flushAsyncWork();
 
-    assert.equal(panelEvents[0]?.summary?.status, 'pending');
-    assert.equal(panelEvents[0]?.summary?.model, 'host-event-model');
+    assert.equal(panelEvents.length, 0);
     resolveFetch(new Response(JSON.stringify({ usage: { prompt_tokens: 1, total_tokens: 1 } })));
     await fetchPromise;
     await flushAsyncWork();
-    assert.ok(panelEvents.some(event => event.summary?.status === 'completed'));
+    assert.ok(
+      panelEvents.some(event => event.summary?.status === 'completed' && event.summary?.model === 'host-event-model'),
+    );
   } finally {
     handle.destroy();
     cleanupTestEnvironment();
@@ -681,11 +679,7 @@ test('captures TauriTavern native LLM API logs without relying on fetch patching
     });
     await flushAsyncWork();
     assert.equal(fetchCalls, 1);
-    assert.equal(stores.summaryRecords.size, 1);
-    const [pendingSummary] = stores.summaryRecords.values();
-    assert.equal(pendingSummary.status, 'pending');
-    assert.equal(pendingSummary.model, 'fetch-should-not-duplicate');
-    const pendingId = pendingSummary.id;
+    assert.equal(stores.summaryRecords.size, 0);
     resolveFetch(completedRouteResponse());
     await fetchPromise;
 
@@ -719,12 +713,12 @@ test('captures TauriTavern native LLM API logs without relying on fetch patching
 
     assert.equal(stores.summaryRecords.size, 1);
     const [summary] = stores.summaryRecords.values();
-    assert.equal(summary.id, pendingId);
     assert.equal(summary.status, 'completed');
     assert.equal(summary.model, 'gemini-3-flash-preview');
     assert.equal(summary.messageCount, 1);
     assert.equal(summary.hitTokens, 8);
     assert.equal(summary.totalTokens, 25);
+    assert.equal(summary.snapshotAvailable, true);
     assert.equal(stores.promptSnapshots.size, 1);
   } finally {
     handle.destroy();
@@ -732,9 +726,54 @@ test('captures TauriTavern native LLM API logs without relying on fetch patching
   }
 });
 
-test('falls back to visible SillyTavern fetch responses when native logs do not arrive', async () => {
-  let subscriber = null;
-  const rawEntries = new Map();
+test('does not install SillyTavern host-function patches inside TauriTavern', async () => {
+  let helperCalls = 0;
+  let serviceCalls = 0;
+  const context = {
+    ConnectionManagerRequestService: {
+      sendRequest: () => {
+        serviceCalls += 1;
+        return { usage: { prompt_tokens_details: { cached_tokens: 5 }, prompt_tokens: 10, total_tokens: 10 } };
+      },
+    },
+  };
+  const { stores } = installTestEnvironment(async () => new Response('{}'));
+  window.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    invoke: {
+      broker: {
+        invoke: async () => ({ started: true }),
+      },
+    },
+  };
+  window.TavernHelper = {
+    generateRaw: () => {
+      helperCalls += 1;
+      return { usage: { prompt_tokens_details: { cached_tokens: 4 }, prompt_tokens: 8, total_tokens: 8 } };
+    },
+  };
+  window.SillyTavern = {
+    getContext: () => context,
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    await flushAsyncWork();
+
+    window.TavernHelper.generateRaw('helper prompt');
+    context.ConnectionManagerRequestService.sendRequest({ prompt: 'service prompt' });
+    await flushAsyncWork();
+
+    assert.equal(helperCalls, 1);
+    assert.equal(serviceCalls, 1);
+    assert.equal(stores.summaryRecords.size, 0);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('captures visible SillyTavern fetch responses when no TauriTavern native log API exists', async () => {
   const payload = {
     model: 'st-visible-response-model',
     messages: [{ role: 'user', content: 'visible response should complete pending' }],
@@ -748,6 +787,141 @@ test('falls back to visible SillyTavern fetch responses when native logs do not 
         total_tokens: 12,
       },
     }));
+  });
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    await flushAsyncWork();
+
+    await window.fetch(TARGET_API, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    await flushAsyncWork();
+
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'st-visible-response-model');
+    assert.equal(summary.hitTokens, 4);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('captures multiple TauriTavern native log entries independently', async () => {
+  let subscriber = null;
+  const rawEntries = new Map();
+  const { stores } = installTestEnvironment(async () => new Response('{}'));
+  window.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    api: {
+      dev: {
+        llmApiLogs: {
+          index: async () => [],
+          getRaw: async id => rawEntries.get(id),
+          subscribeIndex: async handler => {
+            subscriber = handler;
+            return () => {};
+          },
+        },
+      },
+    },
+  };
+  const firstPayload = {
+    model: 'first-native-model',
+    messages: [{ role: 'user', content: 'first native payload' }],
+  };
+  const secondPayload = {
+    model: 'second-native-model',
+    messages: [{ role: 'user', content: 'second native payload' }],
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    await flushAsyncWork();
+    assert.equal(typeof subscriber, 'function');
+
+    rawEntries.set(31, {
+      id: 31,
+      requestRaw: JSON.stringify(firstPayload),
+      responseRaw: JSON.stringify({
+        usage: {
+          prompt_tokens_details: { cached_tokens: 12 },
+          prompt_tokens: 20,
+          completion_tokens: 4,
+          total_tokens: 24,
+        },
+      }),
+      responseRawKind: 'json',
+    });
+    subscriber({ id: 31, timestampMs: Date.now(), ok: true, stream: false });
+    await flushAsyncWork();
+
+    rawEntries.set(32, {
+      id: 32,
+      requestRaw: JSON.stringify(secondPayload),
+      responseRaw: JSON.stringify({
+        usage: {
+          prompt_tokens_details: { cached_tokens: 18 },
+          prompt_tokens: 22,
+          completion_tokens: 5,
+          total_tokens: 27,
+        },
+      }),
+      responseRawKind: 'json',
+    });
+    subscriber({ id: 32, timestampMs: Date.now(), ok: true, stream: false });
+    await flushAsyncWork();
+
+    assert.equal(stores.summaryRecords.size, 2);
+    const summaries = Array.from(stores.summaryRecords.values());
+    const firstSummary = summaries.find(summary => summary.model === 'first-native-model');
+    const secondSummary = summaries.find(summary => summary.model === 'second-native-model');
+    assert.equal(firstSummary.status, 'completed');
+    assert.equal(firstSummary.hitTokens, 12);
+    assert.equal(secondSummary.status, 'completed');
+    assert.equal(secondSummary.hitTokens, 18);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('reconciles TauriTavern native logs with stored pending records when the in-memory queue missed them', async () => {
+  let subscriber = null;
+  const rawEntries = new Map();
+  const now = Date.now();
+  const pendingId = 'stored-tt-pending';
+  const payload = {
+    model: 'stored-native-model',
+    messages: [{ role: 'user', content: 'stored native prompt' }],
+  };
+  const { stores } = installTestEnvironment(async () => new Response('{}'));
+  stores.summaryRecords.set(pendingId, {
+    id: pendingId,
+    timestamp: now - 1200,
+    status: 'pending',
+    model: 'stored-native-model',
+    messageCount: 1,
+    promptChars: 'stored native prompt'.length,
+    snapshotAvailable: true,
+    hitTokens: 0,
+    missTokens: 0,
+    totalCacheTokens: 0,
+    hitRate: null,
+    outputTokens: 0,
+    totalTokens: 0,
+    rawUsage: null,
+    pricingSnapshot: null,
+    costSnapshot: null,
+    errorMessage: null,
+  });
+  stores.promptSnapshots.set(pendingId, {
+    id: pendingId,
+    timestamp: now - 1200,
+    messages: [{ role: 'user', text: 'stored native prompt', hash: 'stored-native-prompt-hash' }],
   });
   window.__TAURITAVERN__ = {
     ready: Promise.resolve(),
@@ -770,55 +944,63 @@ test('falls back to visible SillyTavern fetch responses when native logs do not 
     await flushAsyncWork();
     assert.equal(typeof subscriber, 'function');
 
-    await window.fetch(TARGET_API, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-    await wait(650);
-    await flushAsyncWork();
-
-    assert.equal(stores.summaryRecords.size, 1);
-    const [fallbackSummary] = stores.summaryRecords.values();
-    assert.equal(fallbackSummary.status, 'completed');
-    assert.equal(fallbackSummary.model, 'st-visible-response-model');
-    assert.equal(fallbackSummary.hitTokens, 4);
-    const fallbackId = fallbackSummary.id;
-
-    rawEntries.set(21, {
-      id: 21,
+    rawEntries.set(41, {
+      id: 41,
       requestRaw: JSON.stringify(payload),
       responseRaw: JSON.stringify({
         usage: {
-          prompt_tokens_details: { cached_tokens: 9 },
-          prompt_tokens: 10,
-          completion_tokens: 2,
-          total_tokens: 12,
+          prompt_tokens_details: { cached_tokens: 15 },
+          prompt_tokens: 25,
+          completion_tokens: 3,
+          total_tokens: 28,
         },
       }),
       responseRawKind: 'json',
     });
-    subscriber({ id: 21, timestampMs: Date.now(), ok: true, stream: true });
+    subscriber({ id: 41, timestampMs: now, ok: true, stream: false });
     await flushAsyncWork();
 
     assert.equal(stores.summaryRecords.size, 1);
-    const [nativeSummary] = stores.summaryRecords.values();
-    assert.equal(nativeSummary.id, fallbackId);
-    assert.equal(nativeSummary.status, 'completed');
-    assert.equal(nativeSummary.hitTokens, 9);
+    const summary = stores.summaryRecords.get(pendingId);
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'stored-native-model');
+    assert.equal(summary.hitTokens, 15);
+    assert.equal(summary.totalTokens, 28);
+    assert.equal(stores.promptSnapshots.get(pendingId).messages[0].text, 'stored native prompt');
   } finally {
     handle.destroy();
     cleanupTestEnvironment();
   }
 });
 
-test('matches TauriTavern native logs to the correct concurrent pending request', async () => {
+test('reconciles TauriTavern native logs with no-usage fallback records', async () => {
   let subscriber = null;
   const rawEntries = new Map();
-  const fetchResolvers = [];
-  const { stores } = installTestEnvironment(async () => {
-    return new Promise(resolve => {
-      fetchResolvers.push(resolve);
-    });
+  const now = Date.now();
+  const fallbackId = 'stored-tt-no-usage-fallback';
+  const nativePayload = {
+    model: 'deepseek-v4-flash',
+    messages: [{ role: 'user', content: 'native direct request payload' }],
+  };
+  const { stores } = installTestEnvironment(async () => new Response('{}'));
+  stores.summaryRecords.set(fallbackId, {
+    id: fallbackId,
+    timestamp: now - 1500,
+    status: 'completed',
+    model: 'deepseek-v4-flash',
+    messageCount: 2,
+    promptChars: 225248,
+    snapshotAvailable: false,
+    hitTokens: 0,
+    missTokens: 0,
+    totalCacheTokens: 0,
+    hitRate: null,
+    outputTokens: 0,
+    totalTokens: 0,
+    rawUsage: null,
+    pricingSnapshot: null,
+    costSnapshot: null,
+    errorMessage: '未返回缓存数据',
   });
   window.__TAURITAVERN__ = {
     ready: Promise.resolve(),
@@ -835,64 +1017,191 @@ test('matches TauriTavern native logs to the correct concurrent pending request'
       },
     },
   };
-  const firstPayload = {
-    model: 'same-model',
-    messages: [{ role: 'user', content: 'first short payload' }],
-  };
-  const secondPayload = {
-    model: 'same-model',
-    messages: [{ role: 'user', content: 'second longer payload should win native log matching' }],
-  };
   const handle = installCacheInspectorMonitor();
 
   try {
     await flushAsyncWork();
-    const firstFetch = window.fetch(TARGET_API, { method: 'POST', body: JSON.stringify(firstPayload) });
-    const secondFetch = window.fetch(TARGET_API, { method: 'POST', body: JSON.stringify(secondPayload) });
-    await flushAsyncWork();
+    assert.equal(typeof subscriber, 'function');
 
-    assert.equal(stores.summaryRecords.size, 2);
-    const pendingSummaries = Array.from(stores.summaryRecords.values());
-    const firstPending = pendingSummaries.find(summary => summary.promptChars === 'first short payload'.length);
-    const secondPending = pendingSummaries.find(
-      summary => summary.promptChars === 'second longer payload should win native log matching'.length,
-    );
-    assert.ok(firstPending);
-    assert.ok(secondPending);
-
-    rawEntries.set(31, {
-      id: 31,
-      requestRaw: JSON.stringify(secondPayload),
+    rawEntries.set(43, {
+      id: 43,
+      requestRaw: JSON.stringify(nativePayload),
       responseRaw: JSON.stringify({
         usage: {
-          prompt_tokens_details: { cached_tokens: 12 },
-          prompt_tokens: 20,
-          completion_tokens: 4,
-          total_tokens: 24,
+          prompt_tokens_details: { cached_tokens: 77 },
+          prompt_tokens: 101,
+          completion_tokens: 9,
+          total_tokens: 110,
         },
       }),
       responseRawKind: 'json',
     });
-    subscriber({ id: 31, timestampMs: Date.now(), ok: true, stream: false });
+    subscriber({ id: 43, timestampMs: now, ok: true, stream: false });
     await flushAsyncWork();
 
-    const firstAfterLog = stores.summaryRecords.get(firstPending.id);
-    const secondAfterLog = stores.summaryRecords.get(secondPending.id);
-    assert.equal(firstAfterLog.status, 'pending');
-    assert.equal(secondAfterLog.status, 'completed');
-    assert.equal(secondAfterLog.hitTokens, 12);
-
-    fetchResolvers.forEach(resolve =>
-      resolve(new Response(JSON.stringify({ usage: { prompt_tokens: 1, total_tokens: 1 } }))),
-    );
-    await Promise.all([firstFetch, secondFetch]);
+    assert.equal(stores.summaryRecords.size, 1);
+    const summary = stores.summaryRecords.get(fallbackId);
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.hitTokens, 77);
+    assert.equal(summary.totalTokens, 110);
+    assert.equal(summary.errorMessage, null);
   } finally {
     handle.destroy();
     cleanupTestEnvironment();
   }
 });
 
-test('loosely claims the nearest TauriTavern native log when transformed payloads differ', async () => {
+test('recovers stored TauriTavern pending records from historical index entries', async () => {
+  let rawAttempts = 0;
+  const oldTimestamp = Date.now() - 60_000;
+  const pendingId = 'stored-tt-historical-pending';
+  const payload = {
+    model: 'deepseek-v4-flash',
+    messages: [{ role: 'user', content: 'historical native payload' }],
+  };
+  const { stores } = installTestEnvironment(async () => new Response('{}'));
+  stores.summaryRecords.set(pendingId, {
+    id: pendingId,
+    timestamp: oldTimestamp,
+    status: 'pending',
+    model: 'deepseek-v4-flash',
+    messageCount: 1,
+    promptChars: 'historical native payload'.length,
+    snapshotAvailable: false,
+    hitTokens: 0,
+    missTokens: 0,
+    totalCacheTokens: 0,
+    hitRate: null,
+    outputTokens: 0,
+    totalTokens: 0,
+    rawUsage: null,
+    pricingSnapshot: null,
+    costSnapshot: null,
+    errorMessage: null,
+  });
+  window.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    api: {
+      dev: {
+        llmApiLogs: {
+          index: async () => [{ id: 44, timestampMs: oldTimestamp, ok: true, model: 'deepseek-v4-flash', stream: false }],
+          getRaw: async id => {
+            rawAttempts += 1;
+            return {
+              id,
+              requestRaw: JSON.stringify(payload),
+              responseRaw: JSON.stringify({
+                usage: {
+                  prompt_tokens_details: { cached_tokens: 33 },
+                  prompt_tokens: 40,
+                  completion_tokens: 5,
+                  total_tokens: 45,
+                },
+              }),
+              responseRawKind: 'json',
+            };
+          },
+          subscribeIndex: async () => () => {},
+        },
+      },
+    },
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    await flushAsyncWork();
+    assert.equal(rawAttempts, 1);
+    assert.equal(stores.summaryRecords.size, 1);
+    const summary = stores.summaryRecords.get(pendingId);
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.hitTokens, 33);
+    assert.equal(summary.totalTokens, 45);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('reconciles TauriTavern stored pending records when browser and native payload shapes differ', async () => {
+  let subscriber = null;
+  const rawEntries = new Map();
+  const now = Date.now();
+  const pendingId = 'stored-tt-shape-mismatch';
+  const nativePayload = {
+    model: 'deepseek-v4-flash',
+    messages: Array.from({ length: 9 }, (_, index) => ({ role: 'user', content: `native prompt ${index}` })),
+  };
+  const { stores } = installTestEnvironment(async () => new Response('{}'));
+  stores.summaryRecords.set(pendingId, {
+    id: pendingId,
+    timestamp: now - 1800,
+    status: 'pending',
+    model: 'deepseek-v4-flash',
+    messageCount: 59,
+    promptChars: 297548,
+    snapshotAvailable: false,
+    hitTokens: 0,
+    missTokens: 0,
+    totalCacheTokens: 0,
+    hitRate: null,
+    outputTokens: 0,
+    totalTokens: 0,
+    rawUsage: null,
+    pricingSnapshot: null,
+    costSnapshot: null,
+    errorMessage: null,
+  });
+  window.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    api: {
+      dev: {
+        llmApiLogs: {
+          index: async () => [],
+          getRaw: async id => rawEntries.get(id),
+          subscribeIndex: async handler => {
+            subscriber = handler;
+            return () => {};
+          },
+        },
+      },
+    },
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    await flushAsyncWork();
+    assert.equal(typeof subscriber, 'function');
+
+    rawEntries.set(42, {
+      id: 42,
+      requestRaw: JSON.stringify(nativePayload),
+      responseRaw: JSON.stringify({
+        usage: {
+          prompt_tokens_details: { cached_tokens: 1024 },
+          prompt_tokens: 2048,
+          completion_tokens: 64,
+          total_tokens: 2112,
+        },
+      }),
+      responseRawKind: 'json',
+    });
+    subscriber({ id: 42, timestampMs: now, ok: true, stream: false });
+    await flushAsyncWork();
+
+    assert.equal(stores.summaryRecords.size, 1);
+    const summary = stores.summaryRecords.get(pendingId);
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.messageCount, 9);
+    assert.equal(summary.promptChars, nativePayload.messages.reduce((sum, message) => sum + message.content.length, 0));
+    assert.equal(summary.hitTokens, 1024);
+    assert.equal(summary.totalTokens, 2112);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('uses transformed TauriTavern native payloads instead of browser-route pending payloads', async () => {
   let subscriber = null;
   const rawEntries = new Map();
   const fetchResolvers = [];
@@ -938,11 +1247,7 @@ test('loosely claims the nearest TauriTavern native log when transformed payload
     await wait(10);
     await flushAsyncWork();
 
-    const pendingSummaries = Array.from(stores.summaryRecords.values());
-    const firstPending = pendingSummaries.find(summary => summary.promptChars === 'browser first prompt'.length);
-    const secondPending = pendingSummaries.find(summary => summary.promptChars === 'browser second prompt'.length);
-    assert.ok(firstPending, JSON.stringify(pendingSummaries));
-    assert.ok(secondPending, JSON.stringify(pendingSummaries));
+    assert.equal(stores.summaryRecords.size, 0);
 
     rawEntries.set(41, {
       id: 41,
@@ -963,10 +1268,14 @@ test('loosely claims the nearest TauriTavern native log when transformed payload
     subscriber({ id: 41, timestampMs: Date.now(), ok: true, stream: true });
     await flushAsyncWork();
 
-    assert.equal(stores.summaryRecords.get(firstPending.id).status, 'pending');
-    const secondAfterLog = stores.summaryRecords.get(secondPending.id);
-    assert.equal(secondAfterLog.status, 'completed');
-    assert.equal(secondAfterLog.hitTokens, 16);
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'same-native-model');
+    assert.equal(summary.promptChars, 'native transformed prompt text'.length);
+    assert.equal(summary.hitTokens, 16);
+    assert.equal(summary.snapshotAvailable, true);
+    assert.equal(stores.promptSnapshots.size, 1);
 
     fetchResolvers.forEach(resolve =>
       resolve(new Response(JSON.stringify({ usage: { prompt_tokens: 1, total_tokens: 1 } }))),
@@ -978,7 +1287,7 @@ test('loosely claims the nearest TauriTavern native log when transformed payload
   }
 });
 
-test('shows pending records from TauriTavern native invoke when route fetch is not visible', async () => {
+test('captures TauriTavern native invoke records when route fetch is not visible', async () => {
   let subscriber = null;
   let resolveInvoke;
   const rawEntries = new Map();
@@ -1028,13 +1337,8 @@ test('shows pending records from TauriTavern native invoke when route fetch is n
     });
     await flushAsyncWork();
 
-    assert.equal(stores.summaryRecords.size, 1);
-    const [pendingSummary] = stores.summaryRecords.values();
-    assert.equal(pendingSummary.status, 'pending');
-    assert.equal(pendingSummary.model, 'invoke-stream-model');
-    assert.equal(changedEvents[0]?.summary?.status, 'pending');
-    assert.equal(changedEvents[0]?.summary?.model, 'invoke-stream-model');
-    const pendingId = pendingSummary.id;
+    assert.equal(stores.summaryRecords.size, 0);
+    assert.equal(changedEvents.length, 0);
 
     resolveInvoke({ started: true });
     await startPromise;
@@ -1054,11 +1358,12 @@ test('shows pending records from TauriTavern native invoke when route fetch is n
 
     assert.equal(stores.summaryRecords.size, 1);
     const [summary] = stores.summaryRecords.values();
-    assert.equal(summary.id, pendingId);
     assert.equal(summary.status, 'completed');
     assert.equal(summary.model, 'invoke-stream-model');
     assert.equal(summary.hitTokens, 12);
     assert.equal(summary.totalTokens, 24);
+    assert.equal(summary.snapshotAvailable, true);
+    assert.ok(changedEvents.some(event => event.summary?.status === 'completed' && event.summary.id === summary.id));
     assert.equal(stores.promptSnapshots.size, 1);
   } finally {
     handle.destroy();
@@ -1124,38 +1429,27 @@ test('retries TauriTavern native raw log reads because the event can arrive befo
   }
 });
 
-test('keeps polling TauriTavern native log index while raw files are late', async () => {
-  let subscriber = null;
-  let rawReady = false;
+test('polls TauriTavern native log index without subscription support', async () => {
   let rawAttempts = 0;
   let indexCalls = 0;
-  let resolveInvoke;
-  const invokeResult = new Promise(resolve => {
-    resolveInvoke = resolve;
-  });
+  let exposeLog = false;
   const payload = {
-    model: 'late-native-log-model',
+    model: 'indexed-native-log-model',
     stream: true,
-    messages: [{ role: 'user', content: 'late native raw payload' }],
+    messages: [{ role: 'user', content: 'indexed native raw payload' }],
   };
   const { stores } = installTestEnvironment(async () => new Response('{}'));
   window.__TAURITAVERN__ = {
     ready: Promise.resolve(),
-    invoke: {
-      broker: {
-        invoke: async () => invokeResult,
-      },
-    },
     api: {
       dev: {
         llmApiLogs: {
           index: async () => {
             indexCalls += 1;
-            return [{ id: 9, timestampMs: Date.now(), ok: true, stream: true }];
+            return exposeLog ? [{ id: 9, timestampMs: Date.now(), ok: true, stream: true }] : [];
           },
           getRaw: async id => {
             rawAttempts += 1;
-            if (!rawReady) throw new Error(`raw ${id} not ready yet`);
             return {
               id,
               requestRaw: JSON.stringify(payload),
@@ -1167,10 +1461,6 @@ test('keeps polling TauriTavern native log index while raw files are late', asyn
               responseRawKind: 'sse',
             };
           },
-          subscribeIndex: async handler => {
-            subscriber = handler;
-            return () => {};
-          },
         },
       },
     },
@@ -1179,37 +1469,66 @@ test('keeps polling TauriTavern native log index while raw files are late', asyn
 
   try {
     await flushAsyncWork();
-    assert.equal(typeof subscriber, 'function');
+    assert.equal(stores.summaryRecords.size, 0);
+    assert.ok(indexCalls >= 1);
 
-    const startPromise = window.__TAURITAVERN__.invoke.broker.invoke('start_chat_completion_stream', {
-      streamId: 'late-stream',
-      dto: payload,
-    });
+    exposeLog = true;
+    await wait(1300);
     await flushAsyncWork();
 
-    const [pendingSummary] = stores.summaryRecords.values();
-    assert.equal(pendingSummary.status, 'pending');
-    const pendingId = pendingSummary.id;
-
-    resolveInvoke({ started: true });
-    await startPromise;
-    subscriber({ id: 9, timestampMs: Date.now(), ok: true, stream: true });
-
-    await wait(2800);
-    await flushAsyncWork();
-    assert.equal(stores.summaryRecords.get(pendingId).status, 'pending');
-
-    rawReady = true;
-    await wait(2200);
-    await flushAsyncWork();
-
-    const summary = stores.summaryRecords.get(pendingId);
     assert.ok(indexCalls >= 2);
-    assert.ok(rawAttempts >= 2);
+    assert.ok(rawAttempts >= 1);
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
     assert.equal(summary.status, 'completed');
-    assert.equal(summary.model, 'late-native-log-model');
+    assert.equal(summary.model, 'indexed-native-log-model');
     assert.equal(summary.hitTokens, 21);
     assert.equal(summary.totalTokens, 35);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('does not hydrate historical TauriTavern index entries on panel startup', async () => {
+  let rawAttempts = 0;
+  const oldTimestamp = Date.now() - 60_000;
+  const { stores } = installTestEnvironment(async () => new Response('{}'));
+  window.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    api: {
+      dev: {
+        llmApiLogs: {
+          index: async () => [{ id: 99, timestampMs: oldTimestamp, ok: true, stream: false }],
+          getRaw: async id => {
+            rawAttempts += 1;
+            return {
+              id,
+              requestRaw: JSON.stringify({
+                model: 'old-index-model',
+                messages: [{ role: 'user', content: 'old historical prompt' }],
+              }),
+              responseRaw: JSON.stringify({
+                usage: {
+                  prompt_tokens_details: { cached_tokens: 1 },
+                  prompt_tokens: 2,
+                  total_tokens: 2,
+                },
+              }),
+              responseRawKind: 'json',
+            };
+          },
+          subscribeIndex: async () => () => {},
+        },
+      },
+    },
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    await flushAsyncWork();
+    assert.equal(rawAttempts, 0);
+    assert.equal(stores.summaryRecords.size, 0);
   } finally {
     handle.destroy();
     cleanupTestEnvironment();
@@ -1324,6 +1643,25 @@ function createObjectStore(stores, storeName) {
 
   return {
     createIndex: () => {},
+    index: () => ({
+      openCursor: (_query, direction) => createCursorRequest(
+        Array.from(store.values())
+          .map(cloneValue)
+          .sort((left, right) =>
+            direction === 'prev' ? right.timestamp - left.timestamp : left.timestamp - right.timestamp,
+          ),
+      ),
+    }),
+    indexNames: {
+      contains: name => name === 'timestamp',
+    },
+    openCursor: (_query, direction) => createCursorRequest(
+      Array.from(store.values())
+        .map(cloneValue)
+        .sort((left, right) =>
+          direction === 'prev' ? right.timestamp - left.timestamp : left.timestamp - right.timestamp,
+        ),
+    ),
     put: value => {
       store.set(value.id, structuredClone(value));
       return createRequest(value.id);
@@ -1339,6 +1677,35 @@ function createObjectStore(stores, storeName) {
       return createRequest(undefined);
     },
   };
+}
+
+function createCursorRequest(values) {
+  const request = {
+    result: undefined,
+    error: null,
+    onsuccess: null,
+    onerror: null,
+  };
+  let index = 0;
+
+  const advance = () => {
+    queueMicrotask(() => {
+      const value = values[index];
+      request.result = value === undefined
+        ? null
+        : {
+            value: cloneValue(value),
+            continue: () => {
+              index += 1;
+              advance();
+            },
+          };
+      request.onsuccess?.();
+    });
+  };
+
+  advance();
+  return request;
 }
 
 function createRequest(result) {

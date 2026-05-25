@@ -444,7 +444,7 @@ const CHART_TOP = 12;
 const CHART_BASELINE = 116;
 const CHART_LEFT = 12;
 const CHART_RIGHT = 308;
-const PENDING_RECORD_REFRESH_DELAY_MS = 1500;
+const PENDING_RECORD_REFRESH_DELAY_MS = 500;
 const PANEL_TRACE_LIMIT = 300;
 
 type BarMark = {
@@ -627,7 +627,7 @@ async function refreshRecords(): Promise<void> {
   isLoading.value = true;
   loadError.value = '';
   try {
-    records.value = await listCacheSummaries();
+    records.value = filterDisplayableRecords(await listCacheSummaries());
     pruneSelection();
   } catch (error) {
     loadError.value = `读取缓存记录失败：${formatError(error)}`;
@@ -679,6 +679,11 @@ async function confirmClearRecords(): Promise<void> {
 }
 
 function upsertRecord(summary: CacheSummaryRecord): void {
+  if (!isDisplayableRecord(summary)) {
+    records.value = records.value.filter(record => record.id !== summary.id);
+    pruneSelection();
+    return;
+  }
   logPanelTrace('panel.event.upsert', {
     id: summary.id,
     status: summary.status,
@@ -759,7 +764,7 @@ async function refreshPendingRecordsFromStorage(): Promise<void> {
   pendingRecordsRefreshRunning = true;
   try {
     const beforePendingIds = new Set(records.value.filter(record => record.status === 'pending').map(record => record.id));
-    const storedRecords = await listCacheSummaries();
+    const storedRecords = filterDisplayableRecords(await listCacheSummaries());
     const transitions = storedRecords
       .filter(record => beforePendingIds.has(record.id) && record.status !== 'pending')
       .map(record => ({
@@ -792,11 +797,19 @@ function mergeStoredCacheSummaries(
   currentRecords: CacheSummaryRecord[],
   storedRecords: CacheSummaryRecord[],
 ): CacheSummaryRecord[] {
-  const nextRecordsById = new Map(currentRecords.map(record => [record.id, record]));
-  for (const record of storedRecords) {
+  const nextRecordsById = new Map(filterDisplayableRecords(currentRecords).map(record => [record.id, record]));
+  for (const record of filterDisplayableRecords(storedRecords)) {
     nextRecordsById.set(record.id, { ...record });
   }
   return Array.from(nextRecordsById.values()).sort(sortRecordsByTimestampDesc);
+}
+
+function filterDisplayableRecords(items: CacheSummaryRecord[]): CacheSummaryRecord[] {
+  return items.filter(isDisplayableRecord);
+}
+
+function isDisplayableRecord(record: CacheSummaryRecord): boolean {
+  return record.status !== 'pending';
 }
 
 function sortRecordsByTimestampDesc(left: CacheSummaryRecord, right: CacheSummaryRecord): number {
@@ -869,10 +882,10 @@ function getCacheModalElements(): HTMLElement[] {
 }
 
 function matchesFilters(record: CacheSummaryRecord): boolean {
+  if (!isDisplayableRecord(record)) return false;
   if (filters.model !== ALL_MODELS && record.model !== filters.model) return false;
   if (filters.diffability === 'diffable' && !record.snapshotAvailable) return false;
   if (filters.diffability === 'stats_only' && record.snapshotAvailable) return false;
-  if (record.status === 'pending') return true;
   if (!matchesCacheRateFilter(record)) return false;
   return true;
 }

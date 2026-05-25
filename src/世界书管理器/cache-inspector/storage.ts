@@ -222,42 +222,95 @@ export async function clearCacheRecords(): Promise<void> {
 }
 
 async function pruneOldRecords(): Promise<void> {
-  const summaries = await listCacheSummaries();
+  let summaries = await listCacheSummaries();
+  const stalePendingIds = summaries.filter(record => record.status === 'pending').map(record => record.id);
+  if (stalePendingIds.length > 0) {
+    await deleteSummariesAndSnapshots(stalePendingIds);
+    summaries = summaries.filter(record => record.status !== 'pending');
+  }
+
   const staleSummaries = summaries.slice(MAX_SUMMARY_RECORDS);
   const staleSummaryIds = new Set(staleSummaries.map(record => record.id));
 
-  const snapshots = await withStore<PromptSnapshotRecord[]>(
-    SNAPSHOT_STORE,
-    'readonly',
-    store => store.getAll(),
-    '读取缓存提示词快照失败',
-  );
-  const sortedSnapshots = snapshots.sort((left, right) => right.timestamp - left.timestamp);
-  let retainedSnapshotBytes = 0;
-  const staleSnapshots = sortedSnapshots.filter((snapshot, index) => {
-    if (index >= MAX_PROMPT_SNAPSHOTS || staleSummaryIds.has(snapshot.id)) return true;
-    const snapshotBytes = estimatePromptSnapshotBytes(snapshot);
-    if (retainedSnapshotBytes + snapshotBytes > MAX_PROMPT_SNAPSHOT_BYTES) return true;
-    retainedSnapshotBytes += snapshotBytes;
-    return false;
-  });
+  const staleSnapshotIds = await collectStaleSnapshotIds(summaries, staleSummaryIds);
 
-  if (staleSummaries.length === 0 && staleSnapshots.length === 0) return;
+  if (staleSummaries.length === 0 && staleSnapshotIds.size === 0) return;
 
+  const summaryById = new Map(summaries.map(record => [record.id, record]));
   await withCacheStores('readwrite', stores => {
     staleSummaries.forEach(record => {
       stores.summary.delete(record.id);
       stores.snapshot.delete(record.id);
     });
-    staleSnapshots.forEach(snapshot => {
-      stores.snapshot.delete(snapshot.id);
-      const summary = summaries.find(record => record.id === snapshot.id);
+    staleSnapshotIds.forEach(id => {
+      stores.snapshot.delete(id);
+      const summary = summaryById.get(id);
       if (summary && !staleSummaryIds.has(summary.id) && summary.snapshotAvailable) {
         stores.summary.put({
           ...summary,
           snapshotAvailable: false,
         });
       }
+    });
+  });
+}
+
+async function collectStaleSnapshotIds(
+  summaries: CacheSummaryRecord[],
+  staleSummaryIds: Set<string>,
+): Promise<Set<string>> {
+  const summaryIds = new Set(summaries.map(record => record.id));
+  const staleSnapshotIds = new Set<string>();
+  let retainedSnapshotBytes = 0;
+  let retainedSnapshotCount = 0;
+  const db = await openDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(SNAPSHOT_STORE, 'readonly');
+      transaction.onerror = () => reject(transaction.error ?? new Error('读取缓存提示词快照失败'));
+      transaction.onabort = () => reject(transaction.error ?? new Error('缓存提示词快照读取事务被中止'));
+      const snapshotStore = transaction.objectStore(SNAPSHOT_STORE);
+      const cursorSource = snapshotStore.indexNames.contains('timestamp')
+        ? snapshotStore.index('timestamp')
+        : snapshotStore;
+      const request = cursorSource.openCursor(null, 'prev');
+      request.onerror = () => reject(request.error ?? new Error('读取缓存提示词快照失败'));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) {
+          resolve();
+          return;
+        }
+
+        const snapshot = cursor.value as PromptSnapshotRecord;
+        const snapshotBytes = estimatePromptSnapshotBytes(snapshot);
+        const shouldDelete =
+          !summaryIds.has(snapshot.id) ||
+          staleSummaryIds.has(snapshot.id) ||
+          retainedSnapshotCount >= MAX_PROMPT_SNAPSHOTS ||
+          retainedSnapshotBytes + snapshotBytes > MAX_PROMPT_SNAPSHOT_BYTES;
+
+        if (shouldDelete) {
+          staleSnapshotIds.add(snapshot.id);
+        } else {
+          retainedSnapshotCount += 1;
+          retainedSnapshotBytes += snapshotBytes;
+        }
+        cursor.continue();
+      };
+    });
+  } finally {
+    db.close();
+  }
+  return staleSnapshotIds;
+}
+
+async function deleteSummariesAndSnapshots(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await withCacheStores('readwrite', stores => {
+    ids.forEach(id => {
+      stores.summary.delete(id);
+      stores.snapshot.delete(id);
     });
   });
 }
