@@ -498,7 +498,7 @@ test('captures TavernHelper.generateRaw requests even when no fetch is visible',
     assert.equal(summary.status, 'completed');
     assert.equal(summary.messageCount, 2);
     assert.equal(summary.promptChars, 'database fill system prompt'.length + 'current table data'.length);
-    assert.equal(summary.errorMessage, '未返回缓存数据');
+    assert.equal(summary.errorMessage, '无缓存明细');
   } finally {
     handle.destroy();
     cleanupTestEnvironment();
@@ -1423,6 +1423,59 @@ test('retries TauriTavern native raw log reads because the event can arrive befo
     assert.equal(summary.model, 'deepseek-v4-flash');
     assert.equal(summary.hitTokens, 6);
     assert.equal(summary.totalTokens, 17);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('extracts TauriTavern stream usage from bare JSON SSE log lines', async () => {
+  let subscriber = null;
+  const { stores } = installTestEnvironment(async () => new Response('{}'));
+  window.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    api: {
+      dev: {
+        llmApiLogs: {
+          index: async () => [],
+          getRaw: async id => ({
+            id,
+            requestRaw: JSON.stringify({
+              model: 'deepseek-v4-flash',
+              stream: true,
+              messages: [{ role: 'user', content: 'direct non-agent stream payload' }],
+            }),
+            responseRaw: [
+              '{"choices":[{"delta":{"content":"ok"}}]}',
+              '{"usage":{"prompt_cache_hit_tokens":12,"prompt_cache_miss_tokens":1880,"prompt_tokens":1892,"completion_tokens":102,"total_tokens":1994}}',
+              '[DONE]',
+            ].join('\n'),
+            responseRawKind: 'sse',
+          }),
+          subscribeIndex: async handler => {
+            subscriber = handler;
+            return () => {};
+          },
+        },
+      },
+    },
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    await flushAsyncWork();
+    subscriber({ id: 12, timestampMs: Date.now(), ok: true, stream: true });
+    await flushAsyncWork();
+
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'deepseek-v4-flash');
+    assert.equal(summary.hitTokens, 12);
+    assert.equal(summary.missTokens, 1880);
+    assert.equal(summary.outputTokens, 102);
+    assert.equal(summary.totalTokens, 1994);
+    assert.equal(summary.errorMessage, null);
   } finally {
     handle.destroy();
     cleanupTestEnvironment();

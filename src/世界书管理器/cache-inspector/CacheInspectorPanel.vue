@@ -18,8 +18,8 @@
       </article>
       <article class="wbc-metric">
         <span>命中 / 未命中</span>
-        <strong>{{ formatNumber(visibleStats.hitTokens) }} / {{ formatNumber(visibleStats.missTokens) }}</strong>
-        <small>输出 {{ formatNumber(visibleStats.outputTokens) }} token</small>
+        <strong :title="tokenBreakdownTooltip(visibleStats)">{{ formatTokenAmount(visibleStats.hitTokens) }} / {{ formatTokenAmount(visibleStats.missTokens) }}</strong>
+        <small :title="tokenExactTooltip('输出', visibleStats.outputTokens)">输出 {{ formatTokenAmount(visibleStats.outputTokens) }} token</small>
       </article>
       <article class="wbc-metric">
         <span>预计花费</span>
@@ -111,7 +111,7 @@
               <span class="wbc-record-text">
                 <strong>{{ formatTime(record.timestamp) }}</strong>
                 <small>{{ record.model }}</small>
-                <small>
+                <small :title="recordTokenTooltip(record)">
                   {{ formatNumber(record.messageCount) }} 条 · {{ formatNumber(record.promptChars) }} 字 ·
                   {{ formatTokenLine(record) }}
                 </small>
@@ -262,8 +262,8 @@
           </article>
           <article>
             <span>Tokens</span>
-            <strong>{{ formatCompactNumber(usageChartData.totalTokens) }}</strong>
-            <small>{{ formatTokenBreakdown(usageChartData) }}</small>
+            <strong :title="tokenExactTooltip('总量', usageChartData.totalTokens)">{{ formatTokenAmount(usageChartData.totalTokens) }}</strong>
+            <small :title="tokenBreakdownTooltip(usageChartData)">{{ formatTokenBreakdown(usageChartData) }}</small>
           </article>
         </div>
 
@@ -354,7 +354,7 @@
             <article class="wbc-chart-card">
               <header>
                 <h4>Tokens</h4>
-                <span>{{ formatCompactNumber(usageChartData.totalTokens) }}</span>
+                <span :title="tokenExactTooltip('总量', usageChartData.totalTokens)">{{ formatTokenAmount(usageChartData.totalTokens) }}</span>
               </header>
               <svg class="wbc-chart-svg" :viewBox="`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`" role="img" aria-label="Tokens 堆叠柱状图">
                 <line class="wbc-axis-line" :x1="CHART_LEFT" :x2="CHART_RIGHT" :y1="CHART_BASELINE" :y2="CHART_BASELINE" />
@@ -388,7 +388,7 @@
               <article v-for="model in usageChartData.modelSummaries" :key="model.model" class="wbc-model-row">
                 <strong>{{ model.model }}</strong>
                 <span>{{ formatNumber(model.requestCount) }} 次</span>
-                <span>{{ formatCompactNumber(model.totalTokens) }} tokens</span>
+                <span :title="tokenExactTooltip(model.model, model.totalTokens)">{{ formatTokenAmount(model.totalTokens) }} tokens</span>
                 <span>{{ formatCny(model.totalCny) }}</span>
               </article>
             </div>
@@ -997,7 +997,7 @@ function buildTokenStackBars(buckets: CacheUsageChartBucket[]): BarMark[] {
         width: layout.width,
         height,
         className: segment.className,
-        label: `${bucket.label} · ${segment.label} ${formatNumber(segment.value)}`,
+        label: tokenChartMarkLabel(bucket.label, segment.label, segment.value),
       });
     }
   });
@@ -1195,8 +1195,13 @@ function fullBreakpointId(side: 'before' | 'after'): string {
 function statusLabel(record: CacheSummaryRecord): string {
   if (record.status === 'pending') return '请求中';
   if (record.status === 'failed') return '失败';
-  if (!record.snapshotAvailable) return '无提示词';
-  return record.errorMessage ?? '完成';
+  if (!record.snapshotAvailable) return '快照过期';
+  return displayErrorMessage(record.errorMessage) ?? '完成';
+}
+
+function displayErrorMessage(message: string | null): string | null {
+  if (message === '未返回缓存数据') return '无缓存明细';
+  return message;
 }
 
 function formatRate(record: CacheSummaryRecord | null): string {
@@ -1206,7 +1211,7 @@ function formatRate(record: CacheSummaryRecord | null): string {
 }
 
 function formatRateValue(value: number | null): string {
-  if (value === null) return '无数据';
+  if (value === null) return '未统计';
   return `${(value * 100).toFixed(1)}%`;
 }
 
@@ -1226,15 +1231,24 @@ function formatTime(timestamp: number): string {
 }
 
 function formatTokenLine(record: CacheSummaryRecord): string {
-  if (record.totalCacheTokens === 0 && record.outputTokens === 0) return 'token 无数据';
-  return `命中 ${formatNumber(record.hitTokens)} / 未 ${formatNumber(record.missTokens)} · 输出 ${formatNumber(record.outputTokens)}`;
+  if (record.totalCacheTokens === 0 && record.outputTokens === 0) return 'token 未统计';
+  return `命中 ${formatTokenAmount(record.hitTokens)} / 未 ${formatTokenAmount(record.missTokens)} · 输出 ${formatTokenAmount(record.outputTokens)}`;
+}
+
+function recordTokenTooltip(record: CacheSummaryRecord): string {
+  const lines = [
+    `消息：${formatNumber(record.messageCount)} 条`,
+    `提示词：${formatNumber(record.promptChars)} 字`,
+    tokenBreakdownTooltip(record),
+  ];
+  return lines.join('\n');
 }
 
 function recordCostLabel(record: CacheSummaryRecord): string {
   if (record.status === 'pending') return '待完成';
   const costSnapshot = priceForRecord(record).costSnapshot;
   if (costSnapshot) return formatCny(costSnapshot.totalCny);
-  if (record.totalCacheTokens + record.outputTokens === 0) return '无 usage';
+  if (record.totalCacheTokens + record.outputTokens === 0) return '未计费';
   return '费率未匹配';
 }
 
@@ -1259,13 +1273,38 @@ function formatNumber(value: number): string {
   return value.toLocaleString('zh-CN');
 }
 
-function formatCompactNumber(value: number): string {
+function formatTokenAmount(value: number): string {
   if (Math.abs(value) < 10_000) return formatNumber(value);
-  return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+  const unit = Math.abs(value) < 100_000_000 ? '万' : '亿';
+  const divisor = Math.abs(value) < 100_000_000 ? 10_000 : 100_000_000;
+  return `${trimTrailingZero((value / divisor).toFixed(1))}${unit}`;
+}
+
+function trimTrailingZero(value: string): string {
+  return value.replace(/\.0$/, '');
+}
+
+function tokenExactTooltip(label: string, value: number): string {
+  return `${label}：${formatNumber(value)} token`;
+}
+
+function tokenBreakdownTooltip(value: TokenBreakdown): string {
+  return [
+    tokenExactTooltip('命中', value.hitTokens),
+    tokenExactTooltip('未命中', value.missTokens),
+    tokenExactTooltip('输出', value.outputTokens),
+  ].join('\n');
 }
 
 function formatTokenBreakdown(value: TokenBreakdown | CacheUsageModelSummary): string {
-  return `命中 ${formatCompactNumber(value.hitTokens)} / 未 ${formatCompactNumber(value.missTokens)} / 输出 ${formatCompactNumber(value.outputTokens)}`;
+  return `命中 ${formatTokenAmount(value.hitTokens)} / 未 ${formatTokenAmount(value.missTokens)} / 输出 ${formatTokenAmount(value.outputTokens)}`;
+}
+
+function tokenChartMarkLabel(bucketLabel: string, segmentLabel: string, value: number): string {
+  const displayValue = formatTokenAmount(value);
+  const exactValue = formatNumber(value);
+  if (displayValue === exactValue) return `${bucketLabel} · ${segmentLabel} ${exactValue} token`;
+  return `${bucketLabel} · ${segmentLabel} ${displayValue}（${exactValue} token）`;
 }
 
 function changedTextLabel(text: string, fullLength: number): string {

@@ -17,6 +17,8 @@ const TAURI_LOG_INDEX_IDLE_POLL_INTERVAL_MS = 1000;
 const TAURI_LOG_INDEX_HISTORY_GRACE_MS = 5_000;
 const MONITOR_WATCHDOG_INTERVAL_MS = 500;
 const CACHE_INSPECTOR_TRACE_LIMIT = 300;
+const NO_CACHE_USAGE_MESSAGE = '无缓存明细';
+const LEGACY_NO_CACHE_USAGE_MESSAGE = '未返回缓存数据';
 export const CACHE_RECORDS_CHANGED_EVENT = 'worldbook-manager:cache-records-changed';
 
 type MonitorWindow = Window &
@@ -1400,7 +1402,11 @@ function isClaimableStoredTauriSummary(record: CacheSummaryRecord): boolean {
   if (record.hitTokens || record.missTokens || record.totalCacheTokens || record.outputTokens || record.totalTokens) {
     return false;
   }
-  return !record.errorMessage || record.errorMessage === '未返回缓存数据';
+  return (
+    !record.errorMessage ||
+    record.errorMessage === NO_CACHE_USAGE_MESSAGE ||
+    record.errorMessage === LEGACY_NO_CACHE_USAGE_MESSAGE
+  );
 }
 
 function isStoredTauriPendingInTimeWindow(record: CacheSummaryRecord, completedAt: number): boolean {
@@ -1737,7 +1743,7 @@ async function hydrateRecordFromUsage(
     ...pricing,
     status: 'completed',
     snapshotAvailable: snapshot === undefined ? record.snapshotAvailable : !!snapshot,
-    errorMessage: usage ? null : '未返回缓存数据',
+    errorMessage: usage ? null : NO_CACHE_USAGE_MESSAGE,
   } satisfies CacheSummaryRecord;
   traceCacheInspector(safeGlobalMonitorWindow(), 'record.hydrate.usage', {
     id: completedRecord.id,
@@ -1988,8 +1994,9 @@ function extractUsageFromResponseText(text: string): Record<string, unknown> | n
 
   let usage: Record<string, unknown> | null = null;
   for (const line of trimmed.split(/\r?\n/u)) {
-    const data = line.trim().replace(/^data:\s*/u, '');
-    if (!data || data === '[DONE]' || data === line.trim()) continue;
+    const rawLine = line.trim();
+    const data = rawLine.replace(/^data:\s*/u, '');
+    if (!data || data === '[DONE]') continue;
     const parsed = parseJsonObject(data);
     const nextUsage = parsed ? extractUsageObject(parsed) : null;
     if (nextUsage) usage = nextUsage;
