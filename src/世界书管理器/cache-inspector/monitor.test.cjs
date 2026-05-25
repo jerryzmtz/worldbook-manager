@@ -7,7 +7,11 @@ process.env.TS_NODE_COMPILER_OPTIONS = JSON.stringify({
 });
 require('ts-node/register/transpile-only');
 
-const { CACHE_RECORDS_CHANGED_EVENT, installCacheInspectorMonitor } = require('./monitor.ts');
+const {
+  CACHE_RECORDS_CHANGED_EVENT,
+  cleanupCacheInspectorMonitorPatches,
+  installCacheInspectorMonitor,
+} = require('./monitor.ts');
 
 const TARGET_API = '/api/backends/chat-completions/generate';
 let originalFetch;
@@ -64,6 +68,23 @@ test('captures normal SillyTavern fetch requests after completion', async () => 
     assert.equal(summary.totalTokens, 25);
     assert.ok(changedEvents.some(event => event.summary?.status === 'completed' && event.summary.id === summary.id));
     assert.equal(stores.promptSnapshots.size, 1);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
+test('cleans up stale monitor patches without the original handle', async () => {
+  const routeFetch = async () => new Response('{}');
+  installTestEnvironment(routeFetch);
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    const patchedFetch = window.fetch;
+    assert.notEqual(patchedFetch, routeFetch);
+    cleanupCacheInspectorMonitorPatches();
+    assert.notEqual(window.fetch, patchedFetch);
+    assert.equal(window.__wbmCacheInspectorPatchState, undefined);
   } finally {
     handle.destroy();
     cleanupTestEnvironment();

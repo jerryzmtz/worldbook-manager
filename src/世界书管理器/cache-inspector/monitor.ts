@@ -210,6 +210,12 @@ export type CacheInspectorMonitorHandle = {
   destroy: () => void;
 };
 
+export function cleanupCacheInspectorMonitorPatches(): void {
+  for (const targetWindow of getTargetWindows()) {
+    forceReleaseTargetWindow(targetWindow);
+  }
+}
+
 export function installCacheInspectorMonitor(): CacheInspectorMonitorHandle {
   const runtime: CacheInspectorMonitorRuntime = {
     destroyed: false,
@@ -304,6 +310,13 @@ function releaseTargetWindow(targetWindow: MonitorWindow): void {
     safeSetXMLHttpRequest(targetWindow, patchState.delegateXMLHttpRequest);
   }
   delete targetWindow.__wbmCacheInspectorPatchState;
+}
+
+function forceReleaseTargetWindow(targetWindow: MonitorWindow): void {
+  const patchState = targetWindow.__wbmCacheInspectorPatchState;
+  if (!patchState) return;
+  patchState.installCount = 1;
+  releaseTargetWindow(targetWindow);
 }
 
 function getOrCreatePatchState(targetWindow: MonitorWindow): CacheInspectorPatchState {

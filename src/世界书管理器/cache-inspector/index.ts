@@ -1,6 +1,6 @@
 export { buildFullTextSegments, comparePromptRecords } from './diff';
 export { buildCacheUsageChartData } from './analytics';
-export { CACHE_RECORDS_CHANGED_EVENT, installCacheInspectorMonitor } from './monitor';
+export { CACHE_RECORDS_CHANGED_EVENT, cleanupCacheInspectorMonitorPatches, installCacheInspectorMonitor } from './monitor';
 export { estimateCacheCost } from './pricing';
 export {
   clearCacheRecords,

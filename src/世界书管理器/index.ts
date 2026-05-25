@@ -1,6 +1,10 @@
 import { createScriptIdDiv, teleportStyle } from '@util/script';
 import App from './App.vue';
-import { installCacheInspectorMonitor, type CacheInspectorMonitorHandle } from './cache-inspector';
+import {
+  cleanupCacheInspectorMonitorPatches,
+  installCacheInspectorMonitor,
+  type CacheInspectorMonitorHandle,
+} from './cache-inspector';
 
 const OPEN_MANAGER_BUTTON = '世界书缓存优化器';
 const OPEN_CACHE_INSPECTOR_BUTTON = '缓存命中对比';
@@ -51,6 +55,7 @@ function shouldForceButtonVisibleOnce(): boolean {
 
 $(() => {
   destroyPreviousRuntime();
+  cleanupCacheInspectorMonitorPatches();
   $appRoot = createScriptIdDiv();
   $appRoot.css('display', 'contents');
   $('body').append($appRoot);
