@@ -17,6 +17,7 @@ const TAURI_LOG_INDEX_IDLE_POLL_INTERVAL_MS = 1000;
 const TAURI_LOG_INDEX_HISTORY_GRACE_MS = 5_000;
 const MONITOR_WATCHDOG_INTERVAL_MS = 500;
 const CACHE_INSPECTOR_TRACE_LIMIT = 300;
+const HOST_FUNCTION_CAPTURE_STORAGE_KEY = 'worldbookCacheInspectorHostFunctionCapture';
 const NO_CACHE_USAGE_MESSAGE = '无缓存明细';
 const LEGACY_NO_CACHE_USAGE_MESSAGE = '未返回缓存数据';
 export const CACHE_RECORDS_CHANGED_EVENT = 'worldbook-manager:cache-records-changed';
@@ -28,6 +29,7 @@ type MonitorWindow = Window &
     __wbmCacheInspectorTrace?: CacheInspectorTraceEntry[];
     __wbmCacheInspectorTraceDump?: () => CacheInspectorTraceEntry[];
     __WBM_CACHE_INSPECTOR_DEBUG__?: boolean;
+    __WBM_CACHE_INSPECTOR_HOST_FUNCTION_CAPTURE__?: boolean;
     $?: JQueryLike;
     jQuery?: JQueryLike;
     XMLHttpRequest?: typeof XMLHttpRequest;
@@ -329,7 +331,7 @@ function patchTargetWindow(runtime: CacheInspectorMonitorRuntime, targetWindow: 
   patchFetchTargetWindow(runtime, targetWindow);
   patchAjaxTargetWindow(runtime, targetWindow);
   patchXMLHttpRequestTargetWindow(runtime, targetWindow);
-  if (!runtime.tauriHostDetected) {
+  if (!runtime.tauriHostDetected && shouldPatchHostFunctions(targetWindow)) {
     patchTavernHelperTargetWindow(runtime, targetWindow);
     patchSillyTavernServiceTargetWindow(runtime, targetWindow);
   }
@@ -2832,6 +2834,32 @@ function isDiagnosticLoggingEnabled(targetWindow: MonitorWindow | null): boolean
   } catch {
     return false;
   }
+}
+
+function shouldPatchHostFunctions(targetWindow: MonitorWindow): boolean {
+  if (isHostFunctionCaptureEnabled(targetWindow)) return true;
+  const globalWindow = safeGlobalMonitorWindow();
+  return !!globalWindow && globalWindow !== targetWindow && isHostFunctionCaptureEnabled(globalWindow);
+}
+
+function isHostFunctionCaptureEnabled(targetWindow: MonitorWindow): boolean {
+  try {
+    if (targetWindow.__WBM_CACHE_INSPECTOR_HOST_FUNCTION_CAPTURE__) return true;
+  } catch {
+    return false;
+  }
+
+  try {
+    const value = targetWindow.localStorage?.getItem(HOST_FUNCTION_CAPTURE_STORAGE_KEY);
+    return isEnabledStorageValue(value);
+  } catch {
+    return false;
+  }
+}
+
+function isEnabledStorageValue(value: string | null | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'enabled';
 }
 
 function safeGlobalMonitorWindow(): MonitorWindow | null {

@@ -467,12 +467,34 @@ test('captures XMLHttpRequest requests when the host bypasses fetch and jQuery a
   }
 });
 
+test('leaves TavernHelper.generateRaw unpatched unless host-function capture is enabled', async () => {
+  const { stores } = installTestEnvironment(async () => new Response('{}'));
+  window.TavernHelper = {
+    generateRaw: async () => 'plain result',
+  };
+  const originalGenerateRaw = window.TavernHelper.generateRaw;
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    assert.equal(window.TavernHelper.generateRaw, originalGenerateRaw);
+    const result = await window.TavernHelper.generateRaw({ ordered_prompts: [{ role: 'user', content: 'plain' }] });
+    await flushAsyncWork();
+
+    assert.equal(result, 'plain result');
+    assert.equal(stores.summaryRecords.size, 0);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
 test('captures TavernHelper.generateRaw requests even when no fetch is visible', async () => {
   let fetchCalls = 0;
   const { stores } = installTestEnvironment(async () => {
     fetchCalls += 1;
     return new Response('{}');
   });
+  enableHostFunctionCapture();
   window.TavernHelper = {
     generateRaw: async options => {
       assert.equal(options.should_stream, false);
@@ -516,6 +538,7 @@ test('hydrates TavernHelper.generateRaw captures from nested fetch usage without
       },
     }));
   });
+  enableHostFunctionCapture();
   window.TavernHelper = {
     generateRaw: async options => {
       await window.fetch(TARGET_API, {
@@ -563,6 +586,7 @@ test('captures ConnectionManagerRequestService requests when no fetch is visible
     },
   };
   const { stores } = installTestEnvironment(async () => new Response('{}'));
+  enableHostFunctionCapture();
   window.SillyTavern = {
     getContext: () => context,
   };
@@ -590,6 +614,7 @@ test('captures ConnectionManagerRequestService requests when no fetch is visible
 
 test('captures TavernHelper.generateRaw requests from same-origin sibling iframes', async () => {
   const { stores } = installTestEnvironment(async () => new Response('{}'));
+  enableHostFunctionCapture();
   const siblingWindow = {
     location: { href: 'http://localhost/scripts/extensions/third-party/database/' },
     dispatchEvent: () => true,
@@ -738,6 +763,7 @@ test('does not install SillyTavern host-function patches inside TauriTavern', as
     },
   };
   const { stores } = installTestEnvironment(async () => new Response('{}'));
+  enableHostFunctionCapture();
   window.__TAURITAVERN__ = {
     ready: Promise.resolve(),
     invoke: {
@@ -1628,6 +1654,10 @@ function installJQueryAjaxMock(ajaxImpl) {
   const jquery = { ajax: ajaxImpl };
   window.$ = jquery;
   window.jQuery = jquery;
+}
+
+function enableHostFunctionCapture() {
+  window.__WBM_CACHE_INSPECTOR_HOST_FUNCTION_CAPTURE__ = true;
 }
 
 function cleanupTestEnvironment() {
