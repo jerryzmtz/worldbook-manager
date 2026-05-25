@@ -1162,7 +1162,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import CacheInspectorPanel from './cache-inspector/CacheInspectorPanel.vue';
 import { createBlueEntryMergePlan, type MergeGroup } from './blue-entry-merge';
 import { createCacheInspectorTutorial, createWorldbookTutorial } from './tutorial';
@@ -1184,7 +1184,7 @@ import {
   type VersionRelation,
 } from './version-manager';
 
-const APP_VERSION = 'v3.18';
+const APP_VERSION = 'v3.19';
 const EMPTY_VERSION_CATALOG: VersionCatalog = {
   latestVersion: null,
   versions: [],
@@ -1336,6 +1336,13 @@ type ConfirmState = {
 type BlueTokenWarningState = {
   open: boolean;
   doNotShowAgain: boolean;
+};
+
+type OptimizerFilterPreference = {
+  optimizerMode: OptimizerMode;
+  bookSourceFilter: BookSourceFilter;
+  previewFilter: PreviewFilter;
+  previewSortMode: PreviewSortMode;
 };
 
 type CustomStrategyType = Extract<WorldbookEntry['strategy']['type'], 'constant' | 'selective'>;
@@ -1563,6 +1570,7 @@ const ENTRY_COOLDOWN_RISK_LABEL = '条目冷却设置';
 const APPLY_WARNING_DISMISSED_KEY = 'worldbook_manager_apply_warning_dismissed_v1';
 const BLUE_TOKEN_WARNING_DISMISSED_KEY = 'worldbook_manager_blue_token_warning_dismissed_v1';
 const VERSION_IMPORT_SOURCE_PREF_KEY = 'worldbook_manager_version_import_source_v1';
+const OPTIMIZER_FILTER_PREF_KEY = 'worldbook_manager_optimizer_filters_v1';
 const BLUE_TOKEN_WARNING_THRESHOLD = 400_000;
 const VISUAL_VIEWPORT_CSS_VAR = '--wbm-vvh';
 const OPTIMIZER_MODE_OPTIONS: OptimizerModeOption[] = [
@@ -1747,14 +1755,15 @@ const LEGACY_WARNING_MACROS = new Set(['group']);
 
 const isOpen = ref(false);
 const activePanel = ref<ActivePanel>('optimizer');
-const optimizerMode = ref<OptimizerMode>('cache');
+const optimizerFilterPreference = readOptimizerFilterPreference();
+const optimizerMode = ref<OptimizerMode>(optimizerFilterPreference.optimizerMode);
 const isBusy = ref(false);
 const isSetupCollapsed = ref(false);
 const isPreviewCollapsed = ref(false);
 const bookFilter = ref('');
 const bookSortMode = ref<BookSortMode>('default');
 const selectedBookSortRank = ref<Record<string, number>>({});
-const bookSourceFilter = ref<BookSourceFilter>('all');
+const bookSourceFilter = ref<BookSourceFilter>(optimizerFilterPreference.bookSourceFilter);
 const worldbookNames = ref<string[]>([]);
 const selectedBooks = ref<Set<string>>(new Set());
 const bookSources = ref<Record<string, BookSource[]>>({});
@@ -1763,8 +1772,8 @@ const metadataProgress = reactive<MetadataProgress>({ loaded: 0, total: 0, runni
 const bookListElement = ref<HTMLElement | null>(null);
 const previewRows = ref<PreviewChange[]>([]);
 const applyResults = ref<ApplyResult[]>([]);
-const previewFilter = ref<PreviewFilter>('changed');
-const previewSortMode = ref<PreviewSortMode>('custom');
+const previewFilter = ref<PreviewFilter>(optimizerFilterPreference.previewFilter);
+const previewSortMode = ref<PreviewSortMode>(optimizerFilterPreference.previewSortMode);
 const expandedPreviewIds = ref<Set<string>>(new Set());
 const editingContentIds = ref<Set<string>>(new Set());
 const selectionInitialized = ref(false);
@@ -2512,6 +2521,8 @@ function closeManager(): void {
   structureState.open = false;
   closeCustomEditor();
 }
+
+watch([optimizerMode, bookSourceFilter, previewFilter, previewSortMode], persistOptimizerFilterPreference);
 
 function openVersionManager(): void {
   versionDialog.open = true;
@@ -3701,6 +3712,48 @@ function readVersionImportSourcePreference(): {
   }
 }
 
+function readOptimizerFilterPreference(): OptimizerFilterPreference {
+  const fallback: OptimizerFilterPreference = {
+    optimizerMode: 'cache',
+    bookSourceFilter: 'all',
+    previewFilter: 'changed',
+    previewSortMode: 'custom',
+  };
+  try {
+    const raw = window.localStorage?.getItem(OPTIMIZER_FILTER_PREF_KEY);
+    if (!raw) return fallback;
+    const value = JSON.parse(raw);
+    if (!isRecord(value)) return fallback;
+    return {
+      optimizerMode: isOptimizerMode(value.optimizerMode) ? value.optimizerMode : fallback.optimizerMode,
+      bookSourceFilter: isBookSourceFilter(value.bookSourceFilter)
+        ? value.bookSourceFilter
+        : fallback.bookSourceFilter,
+      previewFilter: isPreviewFilter(value.previewFilter) ? value.previewFilter : fallback.previewFilter,
+      previewSortMode: isPreviewSortMode(value.previewSortMode) ? value.previewSortMode : fallback.previewSortMode,
+    };
+  } catch (error) {
+    console.warn(`[世界书缓存优化器] 读取过滤器偏好失败：${formatError(error)}`);
+    return fallback;
+  }
+}
+
+function persistOptimizerFilterPreference(): void {
+  try {
+    window.localStorage?.setItem(
+      OPTIMIZER_FILTER_PREF_KEY,
+      JSON.stringify({
+        optimizerMode: optimizerMode.value,
+        bookSourceFilter: bookSourceFilter.value,
+        previewFilter: previewFilter.value,
+        previewSortMode: previewSortMode.value,
+      } satisfies OptimizerFilterPreference),
+    );
+  } catch (error) {
+    console.warn(`[世界书缓存优化器] 保存过滤器偏好失败：${formatError(error)}`);
+  }
+}
+
 function persistBlueTokenWarningDismissed(): void {
   blueTokenWarningDismissed.value = true;
   if (typeof updateVariablesWith !== 'function') return;
@@ -3717,6 +3770,38 @@ function safeCall<T>(callback: () => T, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function isOptimizerMode(value: unknown): value is OptimizerMode {
+  return value === 'cache' || value === 'prompt_build_speed';
+}
+
+function isBookSourceFilter(value: unknown): value is BookSourceFilter {
+  return ['all', 'active', 'global', 'character', 'chat', 'none'].includes(String(value));
+}
+
+function isPreviewFilter(value: unknown): value is PreviewFilter {
+  return value === 'changed' || value === 'review' || value === 'all';
+}
+
+function isPreviewSortMode(value: unknown): value is PreviewSortMode {
+  return [
+    'custom',
+    'title_asc',
+    'title_desc',
+    'token_asc',
+    'token_desc',
+    'depth_asc',
+    'depth_desc',
+    'order_asc',
+    'order_desc',
+    'uid_asc',
+    'uid_desc',
+    'probability_asc',
+    'probability_desc',
+    'priority_asc',
+    'priority_desc',
+  ].includes(String(value));
 }
 
 function syncVisualViewportHeight(): void {

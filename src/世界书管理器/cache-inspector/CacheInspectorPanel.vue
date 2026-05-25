@@ -482,6 +482,7 @@ type CacheInspectorTraceWindow = Window & {
   __wbmCacheInspectorTraceDump?: () => CacheInspectorTraceEntry[];
 };
 
+const CACHE_FILTER_PREF_KEY = 'worldbook_manager_cache_inspector_filters_v1';
 const panelElement = ref<HTMLElement | null>(null);
 const records = ref<CacheSummaryRecord[]>([]);
 const snapshotCache = reactive(new Map<string, PromptSnapshotRecord | null>());
@@ -495,12 +496,7 @@ const usageChartOpen = ref(false);
 const selectedBeforeId = ref<string | null>(null);
 const selectedAfterId = ref<string | null>(null);
 const exchangeRateVersion = ref(0);
-const filters = reactive<CacheRecordFilterState>({
-  model: ALL_MODELS,
-  cacheRate: 'all',
-  customMinRate: 0,
-  diffability: 'all',
-});
+const filters = reactive<CacheRecordFilterState>(readCacheFilterPreference());
 const fullText = reactive({
   open: false,
   loading: false,
@@ -621,6 +617,8 @@ watch([selectedBeforeId, selectedAfterId], ([beforeId, afterId]) => {
 watch([usageChartOpen, clearConfirmOpen], ([isUsageChartOpen, isClearConfirmOpen]) => {
   if (isUsageChartOpen || isClearConfirmOpen) scheduleCacheModalViewportSync();
 });
+
+watch(filters, persistCacheFilterPreference, { deep: true });
 
 async function refreshRecords(): Promise<void> {
   clearPendingRecordsRefreshTimer();
@@ -898,6 +896,62 @@ function matchesCacheRateFilter(record: CacheSummaryRecord): boolean {
   if (filters.cacheRate === 'gte_60') return record.hitRate !== null && record.hitRate >= 0.6;
   const minRate = Math.min(100, Math.max(0, Number(filters.customMinRate) || 0)) / 100;
   return record.hitRate !== null && record.hitRate >= minRate;
+}
+
+function readCacheFilterPreference(): CacheRecordFilterState {
+  const fallback: CacheRecordFilterState = {
+    model: ALL_MODELS,
+    cacheRate: 'all',
+    customMinRate: 0,
+    diffability: 'all',
+  };
+  try {
+    const raw = window.localStorage?.getItem(CACHE_FILTER_PREF_KEY);
+    if (!raw) return fallback;
+    const value = JSON.parse(raw);
+    if (!isRecord(value)) return fallback;
+    return {
+      model: typeof value.model === 'string' && value.model.trim() ? value.model : fallback.model,
+      cacheRate: isCacheRateFilter(value.cacheRate) ? value.cacheRate : fallback.cacheRate,
+      customMinRate: normalizeCustomMinRate(value.customMinRate),
+      diffability: isCacheDiffabilityFilter(value.diffability) ? value.diffability : fallback.diffability,
+    };
+  } catch (error) {
+    console.warn(`[缓存命中对比] 读取过滤器偏好失败：${formatError(error)}`);
+    return fallback;
+  }
+}
+
+function persistCacheFilterPreference(): void {
+  try {
+    window.localStorage?.setItem(
+      CACHE_FILTER_PREF_KEY,
+      JSON.stringify({
+        model: filters.model,
+        cacheRate: filters.cacheRate,
+        customMinRate: normalizeCustomMinRate(filters.customMinRate),
+        diffability: filters.diffability,
+      } satisfies CacheRecordFilterState),
+    );
+  } catch (error) {
+    console.warn(`[缓存命中对比] 保存过滤器偏好失败：${formatError(error)}`);
+  }
+}
+
+function isCacheRateFilter(value: unknown): value is CacheRecordFilterState['cacheRate'] {
+  return ['all', 'has_usage', 'gt_zero', 'gte_30', 'gte_60', 'custom'].includes(String(value));
+}
+
+function isCacheDiffabilityFilter(value: unknown): value is CacheRecordFilterState['diffability'] {
+  return value === 'all' || value === 'diffable' || value === 'stats_only';
+}
+
+function normalizeCustomMinRate(value: unknown): number {
+  return Math.min(100, Math.max(0, Number(value) || 0));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function buildVisibleStats(items: CacheSummaryRecord[]): CacheVisibleStats {
