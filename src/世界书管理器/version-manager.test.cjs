@@ -49,6 +49,24 @@ test('uses latest release and falls back to sorted tag list', async () => {
   assert.ok(requested.some(url => url.includes('/tags?per_page=20')));
 });
 
+test('uses jsDelivr data API before GitHub API when listing versions', async () => {
+  const requested = [];
+  const catalog = await fetchVersionCatalog({
+    currentVersion: 'v3.00',
+    fetcher: async url => {
+      requested.push(url);
+      if (url.includes('data.jsdelivr.com')) return jsonResponse({ versions: ['3.16', '3.15', '3.13', 'draft'] });
+      throw new Error(`unexpected request: ${url}`);
+    },
+  });
+
+  assert.equal(catalog.latestVersion, 'v3.16');
+  assert.deepEqual(catalog.versions, ['v3.16', 'v3.15', 'v3.13']);
+  assert.equal(catalog.errorMessage, null);
+  assert.ok(requested.some(url => url.includes('data.jsdelivr.com')));
+  assert.ok(!requested.some(url => url.includes('api.github.com')));
+});
+
 test('falls back to tags when latest release does not exist', async () => {
   const catalog = await fetchVersionCatalog({
     currentVersion: 'v3.00',

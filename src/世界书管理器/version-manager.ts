@@ -90,6 +90,7 @@ export type VersionImportTemplateValidation =
   | { ok: false; message: string; template: string };
 
 const GITHUB_API_BASE = 'https://api.github.com/repos/jerryzmtz/worldbook-manager';
+const JSDELIVR_DATA_API_BASE = 'https://data.jsdelivr.com/v1/package/gh/jerryzmtz/worldbook-manager';
 const VERSION_TAG_PATTERN = /^v\d+(?:\.\d+)+$/;
 const SCRIPT_SCOPES: ScriptScope[] = ['global', 'preset', 'character'];
 const VERSION_PLACEHOLDER = '{version}';
@@ -227,14 +228,23 @@ export async function fetchVersionCatalog(options: {
   }
 
   const errors: string[] = [];
-  const latestFromRelease = await fetchLatestReleaseVersion(fetcher).catch(error => {
-    errors.push(normalizeFetchError(error, '无法读取最新发布版本。'));
-    return null;
-  });
-  const versions = await fetchRepositoryTags(fetcher, limit).catch(error => {
-    errors.push(normalizeFetchError(error, '无法读取版本列表。'));
+  let versions = await fetchJsDelivrVersions(fetcher, limit).catch(error => {
+    errors.push(normalizeFetchError(error, '无法读取 jsDelivr 版本列表。'));
     return [];
   });
+  let latestFromRelease: string | null = versions[0] ?? null;
+
+  if (versions.length === 0) {
+    latestFromRelease = await fetchLatestReleaseVersion(fetcher).catch(error => {
+      errors.push(normalizeFetchError(error, '无法读取最新发布版本。'));
+      return null;
+    });
+    versions = await fetchRepositoryTags(fetcher, limit).catch(error => {
+      errors.push(normalizeFetchError(error, '无法读取版本列表。'));
+      return [];
+    });
+  }
+
   const mergedVersions = sortStableVersionTags([...versions, latestFromRelease].filter(Boolean), limit);
   const latestVersion = latestFromRelease ?? mergedVersions[0] ?? null;
 
@@ -480,6 +490,16 @@ async function fetchLatestReleaseVersion(fetcher: FetchLike): Promise<string | n
   return normalizeVersionTag(payload.tag_name);
 }
 
+async function fetchJsDelivrVersions(fetcher: FetchLike, limit: number): Promise<string[]> {
+  const response = await fetcher(JSDELIVR_DATA_API_BASE, {
+    headers: { Accept: 'application/json' },
+  });
+  if (!response.ok) throw new Error(`jsDelivr data API 返回 ${response.status}`);
+  const payload = (await response.json()) as { versions?: unknown };
+  if (!Array.isArray(payload.versions)) throw new Error('jsDelivr data API 未返回版本列表');
+  return sortStableVersionTags(payload.versions.map(normalizeJsDelivrVersionTag), limit);
+}
+
 async function fetchRepositoryTags(fetcher: FetchLike, limit: number): Promise<string[]> {
   const response = await fetcher(`${GITHUB_API_BASE}/tags?per_page=${Math.max(20, limit)}`, {
     headers: { Accept: 'application/vnd.github+json' },
@@ -487,6 +507,12 @@ async function fetchRepositoryTags(fetcher: FetchLike, limit: number): Promise<s
   if (!response.ok) throw new Error(`GitHub tags API 返回 ${response.status}`);
   const payload = (await response.json()) as Array<{ name?: unknown }>;
   return sortStableVersionTags(payload.map(tag => tag.name), limit);
+}
+
+function normalizeJsDelivrVersionTag(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const version = value.trim();
+  return normalizeVersionTag(version) ?? normalizeVersionTag(`v${version}`);
 }
 
 function sourceStatusMessage(status: ImportParseResult['status']): string {
