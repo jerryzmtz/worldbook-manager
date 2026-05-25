@@ -1169,13 +1169,24 @@ async function captureTauriLlmApiLog(
       return;
     }
 
+    const responseValue = raw.responseRawKind === 'json' ? parseJsonObject(raw.responseRaw ?? '') : null;
+    const responseUsage =
+      raw.responseRawKind === 'json'
+        ? extractUsageFromResponseValue(responseValue) ?? extractUsageFromResponseText(raw.responseRaw ?? '')
+        : extractUsageFromResponseText(raw.responseRaw ?? '');
     let matchedStoredPending: CacheSummaryRecord | null = null;
     const queuedCapture = claimTauriPendingCapture(runtime, payload, entry.timestampMs);
     const capture = createPendingCapture(runtime, payload, queuedCapture?.summary.timestamp ?? entry.timestampMs);
     if (queuedCapture) {
       rebaseCaptureIdentity(capture, queuedCapture.summary.id, queuedCapture.summary.timestamp);
     } else {
-      const storedPending = await claimStoredTauriPendingSummary(runtime, capture.summary, entry.timestampMs, targetWindow);
+      const storedPending = await claimStoredTauriPendingSummary(
+        runtime,
+        capture.summary,
+        entry.timestampMs,
+        targetWindow,
+        responseUsage,
+      );
       if (storedPending) {
         matchedStoredPending = storedPending;
         rebaseCaptureIdentity(capture, storedPending.id, storedPending.timestamp);
@@ -1196,7 +1207,8 @@ async function captureTauriLlmApiLog(
       }
     }
     const matchedExisting = !!queuedCapture || runtime.tauriStoredPendingClaimIds.has(capture.summary.id);
-    const nativeSnapshot = matchedStoredPending?.snapshotAvailable ? undefined : capture.snapshot;
+    const nativeSnapshot =
+      matchedStoredPending?.snapshotAvailable && !matchedStoredPending.rawUsage ? undefined : capture.snapshot;
     traceCacheInspector(targetWindow, matchedExisting ? 'tt.log.pending.matched' : 'tt.log.pending.unmatched-new-record', {
       logId,
       queuedId: queuedCapture?.summary.id ?? null,
@@ -1227,7 +1239,7 @@ async function captureTauriLlmApiLog(
     if (raw.responseRawKind === 'json') {
       await hydrateRecordFromResponseValue(
         capture.summary,
-        parseJsonObject(raw.responseRaw ?? ''),
+        responseValue,
         raw.responseRaw ?? '',
         nativeSnapshot,
       );
@@ -1363,12 +1375,13 @@ async function claimStoredTauriPendingSummary(
   summary: CacheSummaryRecord,
   completedAt?: number,
   targetWindow: MonitorWindow = safeGlobalMonitorWindow(),
+  nativeUsage?: Record<string, unknown> | null,
 ): Promise<CacheSummaryRecord | null> {
   const timestamp = typeof completedAt === 'number' && Number.isFinite(completedAt) ? completedAt : Date.now();
   try {
     const summaries = await listCacheSummaries();
     const pendingRecords = summaries
-      .filter(isClaimableStoredTauriSummary)
+      .filter(record => isClaimableStoredTauriSummary(record, summary, timestamp, nativeUsage ?? null))
       .filter(record => !runtime.tauriStoredPendingClaimIds.has(record.id))
       .filter(record => record.id !== summary.id)
       .filter(record => record.model === summary.model || record.model === '当前模型' || summary.model === '当前模型')
@@ -1376,7 +1389,7 @@ async function claimStoredTauriPendingSummary(
     const candidates = pendingRecords
       .map(record => ({
         record,
-        score: scoreStoredTauriPendingSummary(record, summary, timestamp),
+        score: scoreStoredTauriPendingSummary(record, summary, timestamp, nativeUsage ?? null),
       }))
       .filter((match): match is { record: CacheSummaryRecord; score: number } => match.score > 0)
       .sort((left, right) => right.score - left.score || Math.abs(left.record.timestamp - timestamp) - Math.abs(right.record.timestamp - timestamp));
@@ -1397,10 +1410,15 @@ async function claimStoredTauriPendingSummary(
   }
 }
 
-function isClaimableStoredTauriSummary(record: CacheSummaryRecord): boolean {
+function isClaimableStoredTauriSummary(
+  record: CacheSummaryRecord,
+  summary: CacheSummaryRecord,
+  completedAt: number,
+  nativeUsage: Record<string, unknown> | null,
+): boolean {
   if (record.status === 'pending') return true;
   if (record.status !== 'completed') return false;
-  if (record.rawUsage) return false;
+  if (record.rawUsage) return isLikelyStoredTauriCompletedDuplicate(record, summary, completedAt, nativeUsage);
   if (record.hitTokens || record.missTokens || record.totalCacheTokens || record.outputTokens || record.totalTokens) {
     return false;
   }
@@ -1415,6 +1433,19 @@ function isStoredTauriPendingInTimeWindow(record: CacheSummaryRecord, completedA
   if (record.timestamp < completedAt - TAURI_PENDING_CAPTURE_MAX_AGE_MS) return false;
   if (record.timestamp > completedAt + 30_000) return false;
   return true;
+}
+
+function isLikelyStoredTauriCompletedDuplicate(
+  record: CacheSummaryRecord,
+  summary: CacheSummaryRecord,
+  completedAt: number,
+  nativeUsage: Record<string, unknown> | null,
+): boolean {
+  if (!nativeUsage || !record.rawUsage) return false;
+  if (record.model !== summary.model && record.model !== '当前模型' && summary.model !== '当前模型') return false;
+  if (Math.abs(record.timestamp - completedAt) > 60_000) return false;
+  if (record.messageCount !== summary.messageCount && Math.abs(record.timestamp - completedAt) > 5_000) return false;
+  return usageSnapshotsMatch(record, usageToSnapshot(nativeUsage));
 }
 
 function logStoredTauriPendingMiss(
@@ -1452,9 +1483,21 @@ function scoreStoredTauriPendingSummary(
   record: CacheSummaryRecord,
   summary: CacheSummaryRecord,
   completedAt: number,
+  nativeUsage: Record<string, unknown> | null = null,
 ): number {
   const distanceMs = Math.abs(record.timestamp - completedAt);
   const modelExact = record.model === summary.model;
+  if (record.rawUsage) {
+    if (!isLikelyStoredTauriCompletedDuplicate(record, summary, completedAt, nativeUsage)) return 0;
+    let duplicateScore = modelExact ? 40 : 24;
+    if (record.messageCount === summary.messageCount) duplicateScore += 10;
+    if (record.promptChars === summary.promptChars) duplicateScore += 10;
+    if (distanceMs <= 5_000) duplicateScore += 8;
+    else if (distanceMs <= 30_000) duplicateScore += 5;
+    else duplicateScore += 2;
+    return duplicateScore;
+  }
+
   let score = modelExact ? 12 : 3;
   const messageMatches = record.messageCount === summary.messageCount;
   const promptMatches = record.promptChars === summary.promptChars;
@@ -1472,6 +1515,16 @@ function scoreStoredTauriPendingSummary(
   else if (distanceSeconds <= 120) score += 3;
   else if (distanceMs <= TAURI_STORED_PENDING_LOOSE_MATCH_MAX_AGE_MS) score += 1;
   return score;
+}
+
+function usageSnapshotsMatch(left: CacheUsageSnapshot, right: CacheUsageSnapshot): boolean {
+  return (
+    left.hitTokens === right.hitTokens &&
+    left.missTokens === right.missTokens &&
+    left.totalCacheTokens === right.totalCacheTokens &&
+    left.outputTokens === right.outputTokens &&
+    left.totalTokens === right.totalTokens
+  );
 }
 
 function selectMatchingTauriCapture(

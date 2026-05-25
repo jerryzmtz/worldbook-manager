@@ -1077,6 +1077,94 @@ test('reconciles TauriTavern native logs with no-usage fallback records', async 
   }
 });
 
+test('deduplicates completed visible TauriTavern fallback records when native logs arrive later', async () => {
+  let subscriber = null;
+  const rawEntries = new Map();
+  const now = Date.now();
+  const visibleId = 'stored-tt-visible-completed';
+  const visibleUsage = {
+    prompt_tokens_details: { cached_tokens: 83_000 },
+    prompt_tokens: 89_500,
+    completion_tokens: 1200,
+    total_tokens: 90_700,
+  };
+  const nativePayload = {
+    model: 'deepseek-v4-pro',
+    messages: [
+      { role: 'system', content: 'native system prompt' },
+      { role: 'user', content: 'native user prompt' },
+    ],
+  };
+  const { stores } = installTestEnvironment(async () => new Response('{}'));
+  stores.summaryRecords.set(visibleId, {
+    id: visibleId,
+    timestamp: now - 1200,
+    status: 'completed',
+    model: 'deepseek-v4-pro',
+    messageCount: 2,
+    promptChars: 141_991,
+    snapshotAvailable: true,
+    hitTokens: 83_000,
+    missTokens: 6_500,
+    totalCacheTokens: 89_500,
+    hitRate: 83_000 / 89_500,
+    outputTokens: 1200,
+    totalTokens: 90_700,
+    rawUsage: visibleUsage,
+    pricingSnapshot: null,
+    costSnapshot: null,
+    errorMessage: null,
+  });
+  stores.promptSnapshots.set(visibleId, {
+    id: visibleId,
+    timestamp: now - 1200,
+    messages: [{ role: 'user', text: 'visible fallback prompt', length: 23, hash: 'visible' }],
+  });
+  window.__TAURITAVERN__ = {
+    ready: Promise.resolve(),
+    api: {
+      dev: {
+        llmApiLogs: {
+          index: async () => [],
+          getRaw: async id => rawEntries.get(id),
+          subscribeIndex: async handler => {
+            subscriber = handler;
+            return () => {};
+          },
+        },
+      },
+    },
+  };
+  const handle = installCacheInspectorMonitor();
+
+  try {
+    await flushAsyncWork();
+    assert.equal(typeof subscriber, 'function');
+
+    rawEntries.set(44, {
+      id: 44,
+      requestRaw: JSON.stringify(nativePayload),
+      responseRaw: JSON.stringify({ usage: visibleUsage }),
+      responseRawKind: 'json',
+    });
+    subscriber({ id: 44, timestampMs: now, ok: true, stream: true });
+    await flushAsyncWork();
+
+    assert.equal(stores.summaryRecords.size, 1);
+    const summary = stores.summaryRecords.get(visibleId);
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'deepseek-v4-pro');
+    assert.equal(summary.messageCount, 2);
+    assert.equal(summary.promptChars, 'native system prompt'.length + 'native user prompt'.length);
+    assert.equal(summary.hitTokens, 83_000);
+    assert.equal(summary.totalTokens, 90_700);
+    assert.equal(stores.promptSnapshots.get(visibleId).messages[0].text, 'native system prompt');
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
 test('recovers stored TauriTavern pending records from historical index entries', async () => {
   let rawAttempts = 0;
   const oldTimestamp = Date.now() - 60_000;
