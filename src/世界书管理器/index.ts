@@ -57,15 +57,13 @@ function shouldForceButtonVisibleOnce(): boolean {
 
 $(() => {
   destroyPreviousRuntime();
-  cleanupCacheInspectorMonitorPatches();
+  safeCleanupCacheInspectorMonitorPatches();
   $appRoot = createScriptIdDiv();
   $appRoot.css('display', 'contents');
   $('body').append($appRoot);
   styleHandle = teleportStyle();
   app.mount($appRoot[0]);
 
-  const cacheMonitorOptions = getCacheInspectorMonitorOptions();
-  cacheMonitorHandle = cacheMonitorOptions ? installCacheInspectorMonitor(cacheMonitorOptions) : null;
   syncManagerButton();
   buttonEventHandle = eventOn(getButtonEvent(OPEN_MANAGER_BUTTON), () => {
     console.info('[世界书缓存优化器] 收到脚本按钮事件');
@@ -76,6 +74,7 @@ $(() => {
     window.dispatchEvent(new CustomEvent(OPEN_CACHE_INSPECTOR_EVENT));
   });
   (window as WorldbookManagerWindow)[RUNTIME_GLOBAL_KEY] = { destroy: destroyRuntime };
+  cacheMonitorHandle = safeInstallCacheInspectorMonitor();
 });
 
 function destroyPreviousRuntime(): void {
@@ -86,6 +85,24 @@ function destroyPreviousRuntime(): void {
     console.warn('[世界书缓存优化器] 清理旧脚本实例失败', error);
   } finally {
     managerWindow[RUNTIME_GLOBAL_KEY] = null;
+  }
+}
+
+function safeCleanupCacheInspectorMonitorPatches(): void {
+  try {
+    cleanupCacheInspectorMonitorPatches();
+  } catch (error) {
+    console.warn('[缓存命中对比] 清理旧请求捕获失败，已继续启动面板入口', error);
+  }
+}
+
+function safeInstallCacheInspectorMonitor(): CacheInspectorMonitorHandle | null {
+  try {
+    const cacheMonitorOptions = getCacheInspectorMonitorOptions();
+    return cacheMonitorOptions ? installCacheInspectorMonitor(cacheMonitorOptions) : null;
+  } catch (error) {
+    console.warn('[缓存命中对比] 安装请求捕获失败，已保留面板入口', error);
+    return null;
   }
 }
 
