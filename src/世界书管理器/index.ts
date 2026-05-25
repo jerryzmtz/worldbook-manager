@@ -8,6 +8,16 @@ const LEGACY_OPEN_MANAGER_BUTTONS = ['世界书管理', '打开世界书批量�
 const OPEN_MANAGER_EVENT = 'worldbook-manager:open';
 const OPEN_CACHE_INSPECTOR_EVENT = 'worldbook-manager:open-cache-inspector';
 const DEFAULT_VISIBLE_MIGRATION_KEY = 'worldbookManagerButtonDefaultVisibleMigrated';
+const IOS_CACHE_MONITOR_STORAGE_KEY = 'worldbookCacheInspectorMonitorOnIOS';
+const RUNTIME_GLOBAL_KEY = '__worldbookManagerRuntime';
+
+type WorldbookManagerRuntime = {
+  destroy: () => void;
+};
+
+type WorldbookManagerWindow = Window & {
+  [RUNTIME_GLOBAL_KEY]?: WorldbookManagerRuntime | null;
+};
 
 const app = createApp(App).use(createPinia());
 let styleHandle: { destroy: () => void } | null = null;
@@ -40,13 +50,14 @@ function shouldForceButtonVisibleOnce(): boolean {
 }
 
 $(() => {
+  destroyPreviousRuntime();
   $appRoot = createScriptIdDiv();
   $appRoot.css('display', 'contents');
   $('body').append($appRoot);
   styleHandle = teleportStyle();
   app.mount($appRoot[0]);
 
-  cacheMonitorHandle = installCacheInspectorMonitor();
+  cacheMonitorHandle = shouldSkipCacheInspectorMonitorOnIOS() ? null : installCacheInspectorMonitor();
   syncManagerButton();
   buttonEventHandle = eventOn(getButtonEvent(OPEN_MANAGER_BUTTON), () => {
     console.info('[世界书缓存优化器] 收到脚本按钮事件');
@@ -56,7 +67,47 @@ $(() => {
     console.info('[缓存命中对比] 收到脚本按钮事件');
     window.dispatchEvent(new CustomEvent(OPEN_CACHE_INSPECTOR_EVENT));
   });
+  (window as WorldbookManagerWindow)[RUNTIME_GLOBAL_KEY] = { destroy: destroyRuntime };
 });
+
+function destroyPreviousRuntime(): void {
+  const managerWindow = window as WorldbookManagerWindow;
+  try {
+    managerWindow[RUNTIME_GLOBAL_KEY]?.destroy();
+  } catch (error) {
+    console.warn('[世界书缓存优化器] 清理旧脚本实例失败', error);
+  } finally {
+    managerWindow[RUNTIME_GLOBAL_KEY] = null;
+  }
+}
+
+function shouldSkipCacheInspectorMonitorOnIOS(): boolean {
+  if (!isIOSWebViewLikeRuntime()) return false;
+  if (isIOSCacheMonitorForcedEnabled()) return false;
+  console.warn(
+    `[缓存命中对比] iOS WebView 默认关闭请求捕获，以避免 WebKit 在聊天请求阶段黑屏。需要强制启用可设置 localStorage.${IOS_CACHE_MONITOR_STORAGE_KEY} = '1'。`,
+  );
+  return true;
+}
+
+function isIOSWebViewLikeRuntime(): boolean {
+  try {
+    const userAgent = navigator.userAgent || '';
+    const platform = navigator.platform || '';
+    return /iPad|iPhone|iPod/i.test(userAgent) || (platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  } catch {
+    return false;
+  }
+}
+
+function isIOSCacheMonitorForcedEnabled(): boolean {
+  try {
+    const value = window.localStorage?.getItem(IOS_CACHE_MONITOR_STORAGE_KEY);
+    return value === '1' || value === 'true' || value === 'enabled';
+  } catch {
+    return false;
+  }
+}
 
 function syncManagerButton(): void {
   const forceVisibleOnce = shouldForceButtonVisibleOnce();
@@ -108,7 +159,7 @@ function syncManagerButton(): void {
   });
 }
 
-$(window).on('pagehide', () => {
+function destroyRuntime(): void {
   buttonEventHandle?.stop();
   cacheButtonEventHandle?.stop();
   cacheMonitorHandle?.destroy();
@@ -120,4 +171,10 @@ $(window).on('pagehide', () => {
   cacheMonitorHandle = null;
   styleHandle = null;
   $appRoot = null;
-});
+  const managerWindow = window as WorldbookManagerWindow;
+  if (managerWindow[RUNTIME_GLOBAL_KEY]?.destroy === destroyRuntime) {
+    managerWindow[RUNTIME_GLOBAL_KEY] = null;
+  }
+}
+
+$(window).on('pagehide', destroyRuntime);
