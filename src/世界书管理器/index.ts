@@ -4,6 +4,7 @@ import {
   cleanupCacheInspectorMonitorPatches,
   installCacheInspectorMonitor,
   type CacheInspectorMonitorHandle,
+  type CacheInspectorMonitorOptions,
 } from './cache-inspector';
 
 const OPEN_MANAGER_BUTTON = '世界书缓存优化器';
@@ -12,7 +13,8 @@ const LEGACY_OPEN_MANAGER_BUTTONS = ['世界书管理', '打开世界书批量�
 const OPEN_MANAGER_EVENT = 'worldbook-manager:open';
 const OPEN_CACHE_INSPECTOR_EVENT = 'worldbook-manager:open-cache-inspector';
 const DEFAULT_VISIBLE_MIGRATION_KEY = 'worldbookManagerButtonDefaultVisibleMigrated';
-const IOS_CACHE_MONITOR_STORAGE_KEY = 'worldbookCacheInspectorMonitorOnIOS';
+const IOS_CACHE_MONITOR_DISABLE_STORAGE_KEY = 'worldbookCacheInspectorDisableMonitorOnIOS';
+const IOS_CACHE_TAURI_FALLBACK_STORAGE_KEY = 'worldbookCacheInspectorTauriFallbackOnIOS';
 const RUNTIME_GLOBAL_KEY = '__worldbookManagerRuntime';
 
 type WorldbookManagerRuntime = {
@@ -62,7 +64,8 @@ $(() => {
   styleHandle = teleportStyle();
   app.mount($appRoot[0]);
 
-  cacheMonitorHandle = shouldSkipCacheInspectorMonitorOnIOS() ? null : installCacheInspectorMonitor();
+  const cacheMonitorOptions = getCacheInspectorMonitorOptions();
+  cacheMonitorHandle = cacheMonitorOptions ? installCacheInspectorMonitor(cacheMonitorOptions) : null;
   syncManagerButton();
   buttonEventHandle = eventOn(getButtonEvent(OPEN_MANAGER_BUTTON), () => {
     console.info('[世界书缓存优化器] 收到脚本按钮事件');
@@ -86,13 +89,25 @@ function destroyPreviousRuntime(): void {
   }
 }
 
-function shouldSkipCacheInspectorMonitorOnIOS(): boolean {
+function shouldDisableCacheInspectorMonitorOnIOS(): boolean {
   if (!isIOSWebViewLikeRuntime()) return false;
-  if (isIOSCacheMonitorForcedEnabled()) return false;
+  if (!isIOSCacheMonitorDisabled()) return false;
   console.warn(
-    `[缓存命中对比] iOS WebView 默认关闭请求捕获，以避免 WebKit 在聊天请求阶段黑屏。需要强制启用可设置 localStorage.${IOS_CACHE_MONITOR_STORAGE_KEY} = '1'。`,
+    `[缓存命中对比] 已通过 localStorage.${IOS_CACHE_MONITOR_DISABLE_STORAGE_KEY} 关闭 iOS 请求捕获。`,
   );
   return true;
+}
+
+function getCacheInspectorMonitorOptions(): CacheInspectorMonitorOptions | null {
+  if (shouldDisableCacheInspectorMonitorOnIOS()) return null;
+  if (!isIOSWebViewLikeRuntime()) return {};
+  const captureTauriVisibleResponseFallback = isIOSCacheTauriFallbackEnabled();
+  if (!captureTauriVisibleResponseFallback) {
+    console.info(
+      `[缓存命中对比] iOS WebView 关闭 TauriTavern 可见响应 fallback，以避免读取流式响应体。需要强制启用可设置 localStorage.${IOS_CACHE_TAURI_FALLBACK_STORAGE_KEY} = '1'。`,
+    );
+  }
+  return { captureTauriVisibleResponseFallback };
 }
 
 function isIOSWebViewLikeRuntime(): boolean {
@@ -105,10 +120,21 @@ function isIOSWebViewLikeRuntime(): boolean {
   }
 }
 
-function isIOSCacheMonitorForcedEnabled(): boolean {
+function isIOSCacheMonitorDisabled(): boolean {
   try {
-    const value = window.localStorage?.getItem(IOS_CACHE_MONITOR_STORAGE_KEY);
-    return value === '1' || value === 'true' || value === 'enabled';
+    const value = window.localStorage?.getItem(IOS_CACHE_MONITOR_DISABLE_STORAGE_KEY);
+    if (!value) return false;
+    return ['1', 'true', 'enabled', 'disabled'].includes(value.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function isIOSCacheTauriFallbackEnabled(): boolean {
+  try {
+    const value = window.localStorage?.getItem(IOS_CACHE_TAURI_FALLBACK_STORAGE_KEY);
+    if (!value) return false;
+    return ['1', 'true', 'enabled'].includes(value.toLowerCase());
   } catch {
     return false;
   }

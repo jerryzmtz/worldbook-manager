@@ -10,7 +10,7 @@ export {
   listCacheRecords,
   listCacheSummaries,
 } from './storage';
-export type { CacheInspectorMonitorHandle } from './monitor';
+export type { CacheInspectorMonitorHandle, CacheInspectorMonitorOptions } from './monitor';
 export type { CacheUsageChartBucket, CacheUsageChartData, CacheUsageModelSummary } from './analytics';
 export type {
   CacheDiffabilityFilter,

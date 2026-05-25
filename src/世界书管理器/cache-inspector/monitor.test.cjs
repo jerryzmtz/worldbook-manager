@@ -74,6 +74,96 @@ test('captures normal SillyTavern fetch requests after completion', async () => 
   }
 });
 
+test('can skip TauriTavern visible response fallback without cloning response bodies', async () => {
+  let cloneCalled = false;
+  let subscriber = null;
+  const rawEntries = new Map();
+  const response = new Response(JSON.stringify({
+    usage: {
+      prompt_tokens_details: { cached_tokens: 7 },
+      prompt_tokens: 20,
+      completion_tokens: 5,
+      total_tokens: 25,
+    },
+  }));
+  response.clone = () => {
+    cloneCalled = true;
+    throw new Error('response clone should not be used');
+  };
+  const { stores } = installTestEnvironment(async () => response);
+  window.__TAURITAVERN__ = {
+    api: {
+      dev: {
+        llmApiLogs: {
+          index: async () => [],
+          getRaw: async id => rawEntries.get(id),
+          subscribeIndex: async handler => {
+            subscriber = handler;
+            return () => {};
+          },
+        },
+      },
+    },
+  };
+  const handle = installCacheInspectorMonitor({ captureTauriVisibleResponseFallback: false });
+
+  try {
+    await flushAsyncWork();
+    assert.equal(typeof subscriber, 'function');
+
+    const returnedResponse = await window.fetch(TARGET_API, {
+      method: 'POST',
+      body: JSON.stringify({
+        model: 'metadata-only-model',
+        messages: [{ role: 'user', content: 'metadata only' }],
+      }),
+    });
+    await flushAsyncWork();
+
+    assert.equal(returnedResponse, response);
+    assert.equal(cloneCalled, false);
+    rawEntries.set(1, {
+      id: 1,
+      requestRaw: JSON.stringify({
+        model: 'metadata-only-model',
+        messages: [{ role: 'user', content: 'metadata only' }],
+      }),
+      responseRaw: JSON.stringify({
+        usage: {
+          prompt_tokens_details: { cached_tokens: 7 },
+          prompt_tokens: 20,
+          completion_tokens: 5,
+          total_tokens: 25,
+        },
+      }),
+      responseRawKind: 'json',
+    });
+    subscriber({
+      id: 1,
+      timestampMs: Date.now(),
+      ok: true,
+      source: 'openai',
+      model: 'metadata-only-model',
+      endpoint: 'https://example.test/v1/chat/completions',
+      stream: true,
+    });
+    await flushAsyncWork();
+
+    assert.equal(stores.summaryRecords.size, 1);
+    const [summary] = stores.summaryRecords.values();
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.model, 'metadata-only-model');
+    assert.equal(summary.messageCount, 1);
+    assert.equal(summary.hitTokens, 7);
+    assert.equal(summary.totalTokens, 25);
+    assert.equal(summary.errorMessage, null);
+    assert.equal(stores.promptSnapshots.size, 1);
+  } finally {
+    handle.destroy();
+    cleanupTestEnvironment();
+  }
+});
+
 test('cleans up stale monitor patches without the original handle', async () => {
   const routeFetch = async () => new Response('{}');
   installTestEnvironment(routeFetch);

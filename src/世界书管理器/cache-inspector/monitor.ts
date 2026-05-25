@@ -144,6 +144,7 @@ type CacheInspectorPatchState = {
 
 type CacheInspectorMonitorRuntime = {
   destroyed: boolean;
+  captureTauriVisibleResponseFallback: boolean;
   requestCounter: number;
   targetWindows: Set<MonitorWindow>;
   readyPromise: PromiseLike<unknown> | null;
@@ -210,15 +211,20 @@ export type CacheInspectorMonitorHandle = {
   destroy: () => void;
 };
 
+export type CacheInspectorMonitorOptions = {
+  captureTauriVisibleResponseFallback?: boolean;
+};
+
 export function cleanupCacheInspectorMonitorPatches(): void {
   for (const targetWindow of getTargetWindows()) {
     forceReleaseTargetWindow(targetWindow);
   }
 }
 
-export function installCacheInspectorMonitor(): CacheInspectorMonitorHandle {
+export function installCacheInspectorMonitor(options: CacheInspectorMonitorOptions = {}): CacheInspectorMonitorHandle {
   const runtime: CacheInspectorMonitorRuntime = {
     destroyed: false,
+    captureTauriVisibleResponseFallback: options.captureTauriVisibleResponseFallback ?? true,
     requestCounter: 0,
     targetWindows: new Set(),
     readyPromise: null,
@@ -439,7 +445,11 @@ function createPatchedFetch(
       queueTauriPendingCapture(runtime, capture);
       try {
         const response = await callFetchDelegate(targetWindow, patchState, args);
-        scheduleTauriVisibleResponseFallback(runtime, capture, createResponseTextPromise(response));
+        scheduleTauriVisibleResponseFallback(
+          runtime,
+          capture,
+          runtime.captureTauriVisibleResponseFallback ? createResponseTextPromise(response) : Promise.resolve(''),
+        );
         return response;
       } catch (error) {
         forgetTauriPendingCapture(runtime, capture.summary.id);
@@ -494,7 +504,7 @@ function createPatchedAjax(
       queueTauriPendingCapture(runtime, capture);
       try {
         const result = callAjaxDelegate(ajaxPatch, this, args);
-        attachAjaxTauriCompletionHandlers(runtime, capture, result);
+        attachAjaxTauriCompletionHandlers(runtime, capture, result, runtime.captureTauriVisibleResponseFallback);
         return result;
       } catch (error) {
         forgetTauriPendingCapture(runtime, capture.summary.id);
@@ -564,7 +574,11 @@ function createPatchedXMLHttpRequest(
           () => {
             if (xhr.status >= 200 && xhr.status < 400) {
               if (runtime.tauriNativeLogActive) {
-                scheduleTauriVisibleResponseFallback(runtime, capture, Promise.resolve(xhr.responseText || ''));
+                scheduleTauriVisibleResponseFallback(
+                  runtime,
+                  capture,
+                  Promise.resolve(runtime.captureTauriVisibleResponseFallback ? xhr.responseText || '' : ''),
+                );
                 return;
               }
               void hydrateRecordFromResponseText(capture.summary, xhr.responseText || '', capture.snapshot);
@@ -2707,6 +2721,7 @@ function attachAjaxTauriCompletionHandlers(
   runtime: CacheInspectorMonitorRuntime,
   capture: PendingCapture,
   result: unknown,
+  captureVisibleResponseFallback = true,
 ): void {
   if (!isRecord(result)) return;
 
@@ -2721,7 +2736,9 @@ function attachAjaxTauriCompletionHandlers(
 
   const scheduleFallback = (data: unknown, fallbackText?: string | null): void => {
     const textPromise =
-      typeof fallbackText === 'string' ? Promise.resolve(fallbackText) : Promise.resolve(safeStringify(data) ?? '');
+      captureVisibleResponseFallback
+        ? typeof fallbackText === 'string' ? Promise.resolve(fallbackText) : Promise.resolve(safeStringify(data) ?? '')
+        : Promise.resolve('');
     scheduleTauriVisibleResponseFallback(runtime, capture, textPromise);
   };
 
