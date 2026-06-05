@@ -234,6 +234,15 @@
             <h3>去重方案</h3>
             <span>{{ dedupeSummaryLabel }}</span>
           </div>
+          <button
+            class="wbm-small-btn"
+            type="button"
+            :disabled="isBusy || dedupeScanProgress.running"
+            @click="clearDedupeCacheFromUi"
+          >
+            <i class="fa-solid fa-broom"></i>
+            清空缓存
+          </button>
         </div>
 
         <section class="wbm-preview wbm-dedupe-preview">
@@ -269,6 +278,11 @@
               应用去重
             </button>
             <div class="wbm-filter-stats" aria-live="polite">{{ dedupeSelectionLabel }}</div>
+          </div>
+
+          <div class="wbm-dedupe-cache-status" aria-live="polite">
+            <i class="fa-solid fa-database"></i>
+            <span>{{ dedupeCacheStatusLabel }}</span>
           </div>
 
           <div v-if="dedupeScanVisible" class="wbm-dedupe-progress" aria-live="polite">
@@ -1587,8 +1601,12 @@ import CacheInspectorPanel from './cache-inspector/CacheInspectorPanel.vue';
 import { createBlueEntryMergePlan, type MergeGroup } from './blue-entry-merge';
 import {
   DuplicateWorldbookPlanAbortError,
+  createDuplicateWorldbookFingerprintSignature,
+  createDuplicateWorldbookPlan,
   createDuplicateWorldbookPlanAsync,
   createDuplicateWorldbookRebindPlan,
+  createWorldbookContentFingerprint,
+  parseWorldbookVersionName,
   type DuplicateApplyResult,
   type DuplicateWorldbookPlanProgress,
   type DuplicateWorldbookCandidate,
@@ -1599,6 +1617,15 @@ import {
   type DuplicateWorldbookSource,
   type DuplicateWorldbookStrategy,
 } from './duplicate-worldbook';
+import {
+  clearDedupeCache,
+  createDedupeComparisonCache,
+  dedupeCacheUsesMemoryFallback,
+  getDedupeCacheStats,
+  getDedupeFingerprintCache,
+  saveDedupeFingerprintCacheRecords,
+  type DedupeFingerprintCacheInput,
+} from './duplicate-worldbook-cache';
 import { createCacheInspectorTutorial, createDedupeTutorial, createWorldbookTutorial } from './tutorial';
 import {
   CUSTOM_VERSION_IMPORT_SOURCE_ID,
@@ -1618,7 +1645,7 @@ import {
   type VersionRelation,
 } from './version-manager';
 
-const APP_VERSION = 'v4.00';
+const APP_VERSION = 'v4.01';
 const EMPTY_VERSION_CATALOG: VersionCatalog = {
   latestVersion: null,
   versions: [],
@@ -1779,6 +1806,21 @@ type DedupeScanProgressState = {
   current: number;
   total: number;
   message: string;
+};
+
+type DedupeCacheRunStats = {
+  fingerprintHits: number;
+  fingerprintMisses: number;
+  comparisonHits: number;
+  cachedFingerprints: number;
+  cachedComparisons: number;
+  memoryFallback: boolean;
+  hasRun: boolean;
+};
+
+type DedupeSnapshotReadResult = {
+  snapshot: DuplicateWorldbookSnapshot;
+  cacheRecord: DedupeFingerprintCacheInput | null;
 };
 
 type LoadWorldbooksOptions = {
@@ -2327,6 +2369,15 @@ const dedupeScanProgress = reactive<DedupeScanProgressState>({
   total: 0,
   message: '',
 });
+const dedupeCacheRunStats = reactive<DedupeCacheRunStats>({
+  fingerprintHits: 0,
+  fingerprintMisses: 0,
+  comparisonHits: 0,
+  cachedFingerprints: 0,
+  cachedComparisons: 0,
+  memoryFallback: dedupeCacheUsesMemoryFallback(),
+  hasRun: false,
+});
 const bookListElement = ref<HTMLElement | null>(null);
 const previewRows = ref<PreviewChange[]>([]);
 const applyResults = ref<ApplyResult[]>([]);
@@ -2342,6 +2393,7 @@ const dedupeConfirmState = reactive<DedupeConfirmState>({
 });
 let dedupeScanController: AbortController | null = null;
 let dedupeScanRunId = 0;
+let dedupeCacheFallbackNotified = false;
 const previewFilter = ref<PreviewFilter>(optimizerFilterPreference.previewFilter);
 const previewSortMode = ref<PreviewSortMode>(optimizerFilterPreference.previewSortMode);
 const expandedPreviewIds = ref<Set<string>>(new Set());
@@ -2815,6 +2867,17 @@ const dedupeScanProgressLabel = computed(() => {
   return `${progress}${message}`;
 });
 
+const dedupeCacheStatusLabel = computed(() => {
+  const fallback = dedupeCacheRunStats.memoryFallback ? ' · 只在本次打开内可用' : '';
+  if (dedupeCacheRunStats.hasRun) {
+    return `复用 ${dedupeCacheRunStats.fingerprintHits} 本世界书 · 新扫描 ${dedupeCacheRunStats.fingerprintMisses} 本世界书 · 复用比较结果 ${dedupeCacheRunStats.comparisonHits} 组${fallback}`;
+  }
+  if (dedupeCacheRunStats.cachedFingerprints > 0 || dedupeCacheRunStats.cachedComparisons > 0) {
+    return `已缓存 ${dedupeCacheRunStats.cachedFingerprints} 本世界书 · ${dedupeCacheRunStats.cachedComparisons} 组比较结果${fallback}`;
+  }
+  return dedupeCacheRunStats.memoryFallback ? '去重缓存只能在本次打开内使用，下次会重新扫描。' : '去重缓存：暂无记录';
+});
+
 const dedupeSelectedGroups = computed(() =>
   dedupeGroups.value.filter(group => isDedupeGroupSelected(group.id) && dedupeDeleteCandidates(group).length > 0),
 );
@@ -3187,6 +3250,7 @@ function openDedupe(): void {
   closeTransientModals();
   selectionInitialized.value = false;
   resetDedupeState();
+  void refreshDedupeCacheStats();
   if (dedupeApiReady.value) {
     void loadWorldbooksForDedupe();
   }
@@ -4142,6 +4206,43 @@ function cancelDedupeScan(): void {
   dedupeScanController.abort();
 }
 
+function resetDedupeCacheRunStats(): void {
+  dedupeCacheRunStats.fingerprintHits = 0;
+  dedupeCacheRunStats.fingerprintMisses = 0;
+  dedupeCacheRunStats.comparisonHits = 0;
+  dedupeCacheRunStats.memoryFallback = dedupeCacheUsesMemoryFallback();
+  dedupeCacheRunStats.hasRun = false;
+}
+
+async function refreshDedupeCacheStats(): Promise<void> {
+  try {
+    const stats = await getDedupeCacheStats();
+    dedupeCacheRunStats.cachedFingerprints = stats.fingerprintCount;
+    dedupeCacheRunStats.cachedComparisons = stats.comparisonCount;
+    dedupeCacheRunStats.memoryFallback = stats.memoryFallback;
+  } catch {
+    dedupeCacheRunStats.memoryFallback = true;
+  }
+}
+
+async function clearDedupeCacheFromUi(): Promise<void> {
+  if (isBusy.value || dedupeScanProgress.running) return;
+  try {
+    await clearDedupeCache();
+    resetDedupeCacheRunStats();
+    await refreshDedupeCacheStats();
+    notifySuccess('已清空智能去重缓存，不会影响世界书。');
+  } catch (error) {
+    notifyError(`清空智能去重缓存失败：${formatError(error)}`);
+  }
+}
+
+function notifyDedupeCacheFallbackIfNeeded(): void {
+  if (dedupeCacheFallbackNotified || !dedupeCacheRunStats.memoryFallback) return;
+  dedupeCacheFallbackNotified = true;
+  notifyInfo('当前环境不能长期保存去重缓存；关闭页面后，下次还要重新扫描。本次打开期间仍会复用缓存。');
+}
+
 function resetPreviewManualState(): void {
   entryActionOverrides.value = {};
   customEntryOverrides.value = {};
@@ -4178,7 +4279,9 @@ async function generateDedupePreview(): Promise<void> {
   dedupeSelectedGroupIds.value = new Set();
   dedupeKeepOverrides.value = {};
   dedupeApplyResults.value = [];
+  resetDedupeCacheRunStats();
   const snapshots: DuplicateWorldbookSnapshot[] = [];
+  const pendingFingerprintCaches: DedupeFingerprintCacheInput[] = [];
   const failures: string[] = [];
   setDedupeScanProgress('reading', 0, selectedBookNames.length, '准备读取世界书', {
     running: true,
@@ -4192,17 +4295,10 @@ async function generateDedupePreview(): Promise<void> {
       const bookName = selectedBookNames[index];
       setDedupeScanProgress('reading', index, selectedBookNames.length, bookName, { running: true });
       try {
-        const entries = await getWorldbook(bookName);
+        const result = await readDedupeWorldbookSnapshot(bookName, controller.signal);
         throwIfDedupeScanAborted(controller.signal);
-        const originalData = await loadOriginalWorldbookData(bookName).catch(() => ({}));
-        throwIfDedupeScanAborted(controller.signal);
-        snapshots.push({
-          name: bookName,
-          entries,
-          importedAt: extractWorldbookTimestamp(originalData, ['importedAt', 'createdAt', 'createDate', 'dateAdded']),
-          modifiedAt: extractWorldbookTimestamp(originalData, ['modifiedAt', 'updatedAt', 'updateDate', 'lastModified']),
-          loadedAt: Date.now(),
-        });
+        snapshots.push(result.snapshot);
+        if (result.cacheRecord) pendingFingerprintCaches.push(result.cacheRecord);
       } catch (error) {
         if (error instanceof DuplicateWorldbookPlanAbortError) throw error;
         failures.push(`${bookName}: ${formatError(error)}`);
@@ -4214,17 +4310,28 @@ async function generateDedupePreview(): Promise<void> {
     setDedupeScanProgress('finalize', 0, 1, '正在检查角色卡世界书绑定', { running: true });
     characterWorldbookBindings.value = await collectAllCharacterWorldbookBindings();
     throwIfDedupeScanAborted(controller.signal);
+    const comparisonCache = createDedupeComparisonCache({
+      onHit: () => {
+        dedupeCacheRunStats.comparisonHits += 1;
+      },
+    });
     const plan = await createDuplicateWorldbookPlanAsync(snapshots, toDedupeSourceMap(bookSources.value), {
       keepPriority: 'latest_version',
       strategy: dedupeStrategy.value,
       signal: controller.signal,
       yieldEvery: 1,
+      comparisonCache,
       onProgress: progress => {
         if (runId !== dedupeScanRunId) return;
         setDedupeScanProgress(progress.stage, progress.current, progress.total, progress.message, { running: true });
       },
     });
     if (runId !== dedupeScanRunId) return;
+    throwIfDedupeScanAborted(controller.signal);
+    await saveDedupeFingerprintCacheRecords(pendingFingerprintCaches);
+    dedupeCacheRunStats.hasRun = true;
+    await refreshDedupeCacheStats();
+    notifyDedupeCacheFallbackIfNeeded();
     dedupeGroups.value = plan.groups;
     dedupeSelectedGroupIds.value = new Set(plan.groups.filter(group => group.defaultSelected).map(group => group.id));
 
@@ -4256,6 +4363,68 @@ async function generateDedupePreview(): Promise<void> {
   }
 }
 
+async function readDedupeWorldbookSnapshot(
+  bookName: string,
+  signal: AbortSignal,
+): Promise<DedupeSnapshotReadResult> {
+  const originalData = await loadOriginalWorldbookData(bookName).catch(() => ({}));
+  throwIfDedupeScanAborted(signal);
+  const sourceHash = createWorldbookSourceHash(originalData);
+  if (sourceHash) {
+    const cached = await getDedupeFingerprintCache(bookName, sourceHash);
+    throwIfDedupeScanAborted(signal);
+    if (cached) {
+      dedupeCacheRunStats.fingerprintHits += 1;
+      return {
+        snapshot: {
+          name: bookName,
+          entries: [],
+          fingerprint: cached.fingerprint,
+          versionInfo: cached.versionInfo,
+          importedAt: cached.importedAt,
+          modifiedAt: cached.modifiedAt,
+          loadedAt: cached.loadedAt,
+        },
+        cacheRecord: null,
+      };
+    }
+  }
+
+  const entries = await getWorldbook(bookName);
+  throwIfDedupeScanAborted(signal);
+  const fingerprint = createWorldbookContentFingerprint(entries);
+  const versionInfo = parseWorldbookVersionName(bookName);
+  const importedAt = extractWorldbookTimestamp(originalData, ['importedAt', 'createdAt', 'createDate', 'dateAdded']);
+  const modifiedAt = extractWorldbookTimestamp(originalData, ['modifiedAt', 'updatedAt', 'updateDate', 'lastModified']);
+  const loadedAt = Date.now();
+  const snapshot: DuplicateWorldbookSnapshot = {
+    name: bookName,
+    entries: [],
+    fingerprint,
+    versionInfo,
+    importedAt,
+    modifiedAt,
+    loadedAt,
+  };
+
+  dedupeCacheRunStats.fingerprintMisses += 1;
+  return {
+    snapshot,
+    cacheRecord:
+      sourceHash
+        ? {
+            name: bookName,
+            sourceHash,
+            versionInfo,
+            fingerprint,
+            importedAt,
+            modifiedAt,
+            loadedAt,
+          }
+        : null,
+  };
+}
+
 function toDedupeSourceMap(sources: Record<string, BookSource[]>): Record<string, DuplicateWorldbookSource[]> {
   return Object.fromEntries(
     Object.entries(sources).map(([name, sourceList]) => [
@@ -4275,6 +4444,37 @@ function extractWorldbookTimestamp(data: Record<string, unknown>, keys: string[]
     }
   }
   return null;
+}
+
+function createWorldbookSourceHash(data: Record<string, unknown>): string | null {
+  if (!Object.prototype.hasOwnProperty.call(data, 'entries')) return null;
+  return hashStableValue(data.entries);
+}
+
+function hashStableValue(value: unknown): string {
+  return hashTextValue(stableStringify(value));
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || value === undefined) return 'null';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(item => stableStringify(item)).join(',')}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(String(value));
+}
+
+function hashTextValue(text: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
 function isDedupeGroupSelected(groupId: string): boolean {
@@ -4399,6 +4599,21 @@ async function applyDedupeChanges(): Promise<void> {
       const deleteNames = dedupeDeleteCandidates(group).map(candidate => candidate.name);
       let reboundSources: DuplicateWorldbookSource[] = [];
 
+      const validationError = await validateDedupeGroupBeforeApply(group, keepName, deleteNames);
+      if (validationError) {
+        results.push(
+          ...deleteNames.map(worldbook => ({
+            groupId: group.id,
+            keepName,
+            worldbook,
+            reboundSources: [],
+            failed: true,
+            errorMessage: validationError,
+          })),
+        );
+        continue;
+      }
+
       try {
         reboundSources = await rebindWorldbookReferences(deleteNames, keepName);
       } catch (error) {
@@ -4457,6 +4672,58 @@ async function applyDedupeChanges(): Promise<void> {
   } else {
     notifySuccess(`去重完成，已删除 ${deleted} 本旧版本。`);
   }
+}
+
+async function validateDedupeGroupBeforeApply(
+  group: DuplicateWorldbookGroup,
+  keepName: string,
+  deleteNames: string[],
+): Promise<string | null> {
+  const candidateNames = [...new Set([keepName, ...deleteNames])];
+  const previewSignatures = new Map(
+    group.candidates.map(candidate => [candidate.name, createDuplicateWorldbookFingerprintSignature(candidate.fingerprint)]),
+  );
+
+  let freshSnapshots: DuplicateWorldbookSnapshot[];
+  try {
+    freshSnapshots = await Promise.all(candidateNames.map(readFreshDedupeWorldbookSnapshot));
+  } catch (error) {
+    return `删除前重新读取世界书失败：${formatError(error)}`;
+  }
+
+  for (const snapshot of freshSnapshots) {
+    if (!snapshot.fingerprint) return '删除前检查失败，请重新生成方案。';
+    const previewSignature = previewSignatures.get(snapshot.name);
+    const freshSignature = createDuplicateWorldbookFingerprintSignature(snapshot.fingerprint);
+    if (!previewSignature || previewSignature !== freshSignature) {
+      return '有世界书内容变了，请重新生成方案后再删除。';
+    }
+  }
+
+  const freshPlan = createDuplicateWorldbookPlan(freshSnapshots, toDedupeSourceMap(bookSources.value), {
+    keepPriority: 'latest_version',
+    strategy: group.strategy,
+  });
+  const stillDuplicate = freshPlan.groups.some(freshGroup =>
+    candidateNames.every(name => freshGroup.candidates.some(candidate => candidate.name === name)),
+  );
+  return stillDuplicate ? null : '这组世界书现在不再像重复项，请重新生成方案后再检查。';
+}
+
+async function readFreshDedupeWorldbookSnapshot(bookName: string): Promise<DuplicateWorldbookSnapshot> {
+  const [originalData, entries] = await Promise.all([
+    loadOriginalWorldbookData(bookName).catch(() => ({})),
+    getWorldbook(bookName),
+  ]);
+  return {
+    name: bookName,
+    entries: [],
+    fingerprint: createWorldbookContentFingerprint(entries),
+    versionInfo: parseWorldbookVersionName(bookName),
+    importedAt: extractWorldbookTimestamp(originalData, ['importedAt', 'createdAt', 'createDate', 'dateAdded']),
+    modifiedAt: extractWorldbookTimestamp(originalData, ['modifiedAt', 'updatedAt', 'updateDate', 'lastModified']),
+    loadedAt: Date.now(),
+  };
 }
 
 async function rebindWorldbookReferences(deleteNames: string[], keepName: string): Promise<DuplicateWorldbookSource[]> {
@@ -7726,6 +7993,7 @@ select:disabled {
 }
 
 .wbm-preview-actions > .wbm-primary-btn,
+.wbm-preview-actions > .wbm-danger-btn,
 .wbm-preview-actions > .wbm-small-btn,
 .wbm-preview-actions .wbm-select {
   min-height: 42px;
@@ -7765,6 +8033,29 @@ select:disabled {
 
 .wbm-filter-stats {
   display: none;
+}
+
+.wbm-dedupe-cache-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: var(--wbm-radius-md);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--wbm-muted);
+  font-size: 13px;
+}
+
+.wbm-dedupe-cache-status i {
+  color: var(--wbm-blue-ink);
+}
+
+.wbm-dedupe-cache-status span {
+  min-width: 0;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .wbm-dedupe-progress {
@@ -9765,6 +10056,7 @@ select:disabled {
   }
 
   .wbm-preview-actions > .wbm-primary-btn,
+  .wbm-preview-actions > .wbm-danger-btn,
   .wbm-preview-actions > .wbm-small-btn {
     width: 100%;
     min-width: 0;

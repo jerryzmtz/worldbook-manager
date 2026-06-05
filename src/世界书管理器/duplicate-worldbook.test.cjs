@@ -9,6 +9,7 @@ require('ts-node/register/transpile-only');
 
 const {
   DuplicateWorldbookPlanAbortError,
+  createWorldbookContentFingerprint,
   createDuplicateWorldbookPlanAsync,
   createDuplicateWorldbookPlan,
   createDuplicateWorldbookRebindPlan,
@@ -247,6 +248,86 @@ test('async duplicate plan matches sync plan and reports progress', async () => 
   assert.ok(progressEvents.some(progress => progress.stage === 'finalize'));
 });
 
+test('async duplicate plan accepts cached fingerprints and matches entry snapshots', async () => {
+  const entrySnapshots = [
+    {
+      name: '缓存角色书 v1',
+      entries: [entry('身份', longContent('身份')), entry('住处', longContent('住处'))],
+    },
+    {
+      name: '缓存角色书 v2',
+      entries: [entry('身份新版', longContent('身份')), entry('住处新版', longContent('住处'))],
+    },
+  ];
+  const cachedSnapshots = entrySnapshots.map(snapshot => ({
+    name: snapshot.name,
+    entries: [],
+    fingerprint: createWorldbookContentFingerprint(snapshot.entries),
+  }));
+
+  const entryPlan = await createDuplicateWorldbookPlanAsync(entrySnapshots, {}, { strategy: 'balanced', yieldEvery: 1 });
+  const cachedPlan = await createDuplicateWorldbookPlanAsync(cachedSnapshots, {}, { strategy: 'balanced', yieldEvery: 1 });
+
+  assert.deepEqual(
+    cachedPlan.groups.map(group => ({
+      keep: group.keepCandidate.name,
+      deletes: group.deleteCandidates.map(candidate => candidate.name),
+    })),
+    entryPlan.groups.map(group => ({
+      keep: group.keepCandidate.name,
+      deletes: group.deleteCandidates.map(candidate => candidate.name),
+    })),
+  );
+});
+
+test('comparison cache is reused across strategy changes', async () => {
+  const snapshots = [
+    {
+      name: '比较缓存 v1',
+      entries: [entry('A', longContent('A')), entry('B', longContent('B')), entry('C', longContent('C'))],
+    },
+    {
+      name: '比较缓存 v2',
+      entries: [entry('A2', longContent('A')), entry('B2', longContent('B')), entry('D', longContent('D'))],
+    },
+    {
+      name: '比较缓存 v3',
+      entries: [entry('A3', longContent('A')), entry('B3', longContent('B')), entry('C3', longContent('C'))],
+    },
+  ];
+  const store = new Map();
+  const stats = { hits: 0, misses: 0, sets: 0 };
+  const comparisonCache = {
+    async get(key) {
+      const value = store.get(key) ?? null;
+      if (value) stats.hits += 1;
+      else stats.misses += 1;
+      return value;
+    },
+    async set(key, comparison) {
+      stats.sets += 1;
+      store.set(key, comparison);
+    },
+  };
+
+  const balancedPlan = await createDuplicateWorldbookPlanAsync(snapshots, {}, {
+    strategy: 'balanced',
+    yieldEvery: 1,
+    comparisonCache,
+  });
+  const setsAfterBalanced = stats.sets;
+  const aggressivePlan = await createDuplicateWorldbookPlanAsync(snapshots, {}, {
+    strategy: 'aggressive',
+    yieldEvery: 1,
+    comparisonCache,
+  });
+
+  assert.ok(balancedPlan.groups.length > 0);
+  assert.ok(aggressivePlan.groups.length > 0);
+  assert.ok(setsAfterBalanced > 0);
+  assert.ok(stats.hits > 0);
+});
+
 test('async duplicate plan can be aborted before returning partial results', async () => {
   const controller = new AbortController();
   controller.abort();
@@ -269,6 +350,52 @@ test('async duplicate plan can be aborted before returning partial results', asy
       ),
     error => error instanceof DuplicateWorldbookPlanAbortError,
   );
+});
+
+test('async duplicate plan does not write comparison cache after abort', async () => {
+  const controller = new AbortController();
+  let compareStarted = false;
+  let setCount = 0;
+  const comparisonCache = {
+    async get() {
+      return null;
+    },
+    async set() {
+      setCount += 1;
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      createDuplicateWorldbookPlanAsync(
+        [
+          {
+            name: '中止缓存测试 v1',
+            entries: Array.from({ length: 90 }, (_, index) => entry(`旧条目${index}`, longContent(`旧条目${index}`))),
+          },
+          {
+            name: '中止缓存测试 v2',
+            entries: Array.from({ length: 90 }, (_, index) => entry(`新条目${index}`, longContent(`新条目${index}`))),
+          },
+        ],
+        {},
+        {
+          signal: controller.signal,
+          strategy: 'balanced',
+          yieldEvery: 1,
+          comparisonCache,
+          onProgress: progress => {
+            if (progress.stage !== 'compare' || progress.current === 0 || compareStarted) return;
+            compareStarted = true;
+            setTimeout(() => controller.abort(), 0);
+          },
+        },
+      ),
+    error => error instanceof DuplicateWorldbookPlanAbortError,
+  );
+
+  assert.equal(compareStarted, true);
+  assert.equal(setCount, 0);
 });
 
 test('async duplicate plan responds to abort during large entry comparisons', async () => {

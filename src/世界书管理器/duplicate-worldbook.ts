@@ -76,7 +76,9 @@ export type DuplicateWorldbookEntryContentFingerprint = {
 
 export type DuplicateWorldbookSnapshot = {
   name: string;
-  entries: DuplicateWorldbookEntrySnapshot[];
+  entries?: DuplicateWorldbookEntrySnapshot[];
+  fingerprint?: DuplicateWorldbookContentFingerprint;
+  versionInfo?: WorldbookNameVersionInfo;
   importedAt?: number | null;
   modifiedAt?: number | null;
   loadedAt?: number | null;
@@ -158,6 +160,7 @@ export type DuplicateWorldbookPlanOptions = {
   signal?: AbortSignal;
   onProgress?: (progress: DuplicateWorldbookPlanProgress) => void;
   yieldEvery?: number;
+  comparisonCache?: DuplicateWorldbookComparisonCache;
 };
 
 export type DuplicateWorldbookCharacterBinding = {
@@ -231,10 +234,30 @@ type ContentComparison = {
   exact: boolean;
 };
 
-type CandidateComparison = FingerprintComparison &
-  ContentComparison & {
-    sameFamily: boolean;
-  };
+export type DuplicateWorldbookPairComparison = {
+  similarity: number;
+  leftCoverage: number;
+  rightCoverage: number;
+  smallerCoverage: number;
+  overlap: number;
+  union: number;
+  textSimilarity: number;
+  contentLeftCoverage: number;
+  contentRightCoverage: number;
+  contentSmallerCoverage: number;
+  matchedLeftEntries: number;
+  matchedRightEntries: number;
+  matchedEntryCount: number;
+  exact: boolean;
+  sameFamily: boolean;
+};
+
+type CandidateComparison = DuplicateWorldbookPairComparison;
+
+export type DuplicateWorldbookComparisonCache = {
+  get: (key: string) => Promise<DuplicateWorldbookPairComparison | null>;
+  set: (key: string, comparison: DuplicateWorldbookPairComparison) => Promise<void>;
+};
 
 type DuplicatePair = {
   left: DuplicateWorldbookCandidate;
@@ -253,6 +276,12 @@ type StrategyProfile = {
   exactCoverage: number;
 };
 
+type ComparisonCacheWrite = {
+  key: string;
+  comparison: DuplicateWorldbookPairComparison;
+};
+
+export const DUPLICATE_WORLDBOOK_ALGORITHM_VERSION = 'duplicate-worldbook-v4.00-cache-v1';
 const VERSION_RANK: Record<Exclude<WorldbookNameVersionKind, 'none' | 'copy'>, number> = {
   full_date: 4,
   month_day: 3,
@@ -390,6 +419,29 @@ export function createWorldbookContentFingerprint(
   };
 }
 
+export function createDuplicateWorldbookFingerprintSignature(fingerprint: DuplicateWorldbookContentFingerprint): string {
+  return hashText(
+    JSON.stringify({
+      entryCount: fingerprint.entryCount,
+      enabledEntryCount: fingerprint.enabledEntryCount,
+      contentHash: fingerprint.contentHash,
+      enabledContentHash: fingerprint.enabledContentHash,
+      contentLength: fingerprint.contentLength,
+      entryHashes: fingerprint.entryHashes,
+      enabledEntryHashes: fingerprint.enabledEntryHashes,
+    }),
+  );
+}
+
+export function createDuplicateWorldbookComparisonCacheKey(
+  left: DuplicateWorldbookContentFingerprint,
+  right: DuplicateWorldbookContentFingerprint,
+  sameFamily: boolean,
+): string {
+  const signatures = [createDuplicateWorldbookFingerprintSignature(left), createDuplicateWorldbookFingerprintSignature(right)].sort();
+  return `${sameFamily ? 'same' : 'cross'}:${signatures[0]}:${signatures[1]}`;
+}
+
 export function createDuplicateWorldbookPlan(
   snapshots: DuplicateWorldbookSnapshot[],
   sources: Record<string, DuplicateWorldbookSource[]> = {},
@@ -408,6 +460,7 @@ export async function createDuplicateWorldbookPlanAsync(
 ): Promise<DuplicateWorldbookPlan> {
   const profile = STRATEGY_PROFILES[options.strategy ?? 'balanced'];
   const candidates: DuplicateWorldbookCandidate[] = [];
+  const comparisonCacheWrites: ComparisonCacheWrite[] = [];
   const yieldEvery = Math.max(1, Math.floor(options.yieldEvery ?? 12));
 
   options.onProgress?.({
@@ -431,7 +484,7 @@ export async function createDuplicateWorldbookPlanAsync(
   }
 
   throwIfAborted(options.signal);
-  const pairs = await findDuplicatePairsAsync(candidates, profile, options);
+  const pairs = await findDuplicatePairsAsync(candidates, profile, options, comparisonCacheWrites);
   throwIfAborted(options.signal);
   options.onProgress?.({
     stage: 'finalize',
@@ -441,7 +494,10 @@ export async function createDuplicateWorldbookPlanAsync(
   });
   await yieldToMainThread();
   throwIfAborted(options.signal);
-  return createDuplicatePlanFromCandidates(candidates, pairs, profile);
+  const plan = createDuplicatePlanFromCandidates(candidates, pairs, profile);
+  throwIfAborted(options.signal);
+  await flushComparisonCacheWrites(options, comparisonCacheWrites);
+  return plan;
 }
 
 function createDuplicateCandidate(
@@ -450,8 +506,8 @@ function createDuplicateCandidate(
 ): DuplicateWorldbookCandidate {
   return {
     name: snapshot.name,
-    versionInfo: parseWorldbookVersionName(snapshot.name),
-    fingerprint: createWorldbookContentFingerprint(snapshot.entries),
+    versionInfo: snapshot.versionInfo ?? parseWorldbookVersionName(snapshot.name),
+    fingerprint: snapshot.fingerprint ?? createWorldbookContentFingerprint(snapshot.entries ?? []),
     sources: sources[snapshot.name] ?? [],
     importedAt: snapshot.importedAt ?? null,
     modifiedAt: snapshot.modifiedAt ?? null,
@@ -586,6 +642,7 @@ async function findDuplicatePairsAsync(
   candidates: DuplicateWorldbookCandidate[],
   profile: StrategyProfile,
   options: DuplicateWorldbookPlanOptions,
+  comparisonCacheWrites: ComparisonCacheWrite[],
 ): Promise<DuplicatePair[]> {
   const pairs: DuplicatePair[] = [];
   const total = Math.max(0, (candidates.length * (candidates.length - 1)) / 2);
@@ -616,7 +673,14 @@ async function findDuplicatePairsAsync(
 
       if (sameFamily || profile.compareAcrossFamilies) {
         if (sameFamily || hasComparableWorldbookContent(left, right)) {
-          const comparison = await compareCandidatesAsync(left, right, sameFamily, options, yieldBudget);
+          const comparison = await compareCandidatesWithCacheAsync(
+            left,
+            right,
+            sameFamily,
+            options,
+            yieldBudget,
+            comparisonCacheWrites,
+          );
           if (isDuplicateComparison(comparison, profile, options)) {
             pairs.push({
               left,
@@ -636,6 +700,55 @@ async function findDuplicatePairsAsync(
   }
 
   return pairs;
+}
+
+async function compareCandidatesWithCacheAsync(
+  left: DuplicateWorldbookCandidate,
+  right: DuplicateWorldbookCandidate,
+  sameFamily: boolean,
+  options: DuplicateWorldbookPlanOptions,
+  yieldBudget: AsyncYieldBudget,
+  comparisonCacheWrites: ComparisonCacheWrite[],
+): Promise<CandidateComparison> {
+  const cacheKey = createDuplicateWorldbookComparisonCacheKey(left.fingerprint, right.fingerprint, sameFamily);
+  const cached = await readComparisonCache(options.comparisonCache, cacheKey);
+  if (cached) return cached;
+
+  const comparison = await compareCandidatesAsync(left, right, sameFamily, options, yieldBudget);
+  comparisonCacheWrites.push({ key: cacheKey, comparison });
+  return comparison;
+}
+
+async function readComparisonCache(
+  cache: DuplicateWorldbookComparisonCache | undefined,
+  key: string,
+): Promise<DuplicateWorldbookPairComparison | null> {
+  if (!cache) return null;
+  try {
+    return await cache.get(key);
+  } catch {
+    return null;
+  }
+}
+
+async function flushComparisonCacheWrites(
+  options: DuplicateWorldbookPlanOptions,
+  writes: ComparisonCacheWrite[],
+): Promise<void> {
+  const cache = options.comparisonCache;
+  if (!cache || writes.length === 0) return;
+  const uniqueWrites = new Map(writes.map(write => [write.key, write.comparison]));
+  let flushed = 0;
+  for (const [key, comparison] of uniqueWrites) {
+    throwIfAborted(options.signal);
+    try {
+      await cache.set(key, comparison);
+    } catch {
+      // Comparison cache is only an accelerator; cache write failures must not block dedupe.
+    }
+    flushed += 1;
+    if (flushed % 50 === 0) await yieldToMainThread();
+  }
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
