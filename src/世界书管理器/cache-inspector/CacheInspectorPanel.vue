@@ -60,8 +60,8 @@
         <span>提示词</span>
         <select v-model="filters.diffability">
           <option value="all">全部记录</option>
-          <option value="diffable">已保存提示词</option>
-          <option value="stats_only">未保存提示词</option>
+          <option value="diffable">保存了提示词</option>
+          <option value="stats_only">只保留统计信息</option>
         </select>
       </label>
     </div>
@@ -128,7 +128,7 @@
                 type="button"
                 :class="{ active: record.id === selectedBeforeId }"
                 :disabled="!record.snapshotAvailable"
-                :title="record.snapshotAvailable ? '设为旧请求' : '没有保存提示词，不能找断点'"
+                :title="record.snapshotAvailable ? '设为旧请求' : '完整提示词已过期，所以找不到断点'"
                 @click.stop="setBefore(record)"
               >
                 旧
@@ -138,7 +138,7 @@
                 type="button"
                 :class="{ active: record.id === selectedAfterId }"
                 :disabled="!record.snapshotAvailable"
-                :title="record.snapshotAvailable ? '设为新请求' : '没有保存提示词，不能找断点'"
+                :title="record.snapshotAvailable ? '设为新请求' : '完整提示词已过期，所以找不到断点'"
                 @click.stop="setAfter(record)"
               >
                 新
@@ -182,11 +182,11 @@
         </div>
         <div v-else-if="isDiffLoading" class="wbc-empty-state">
           <i class="fa-solid fa-circle-notch fa-spin"></i>
-          <span>读取提示词快照...</span>
+          <span>正在读取提示词...</span>
         </div>
         <div v-else-if="!selectedBeforeSnapshot || !selectedAfterSnapshot" class="wbc-empty-state">
           <i class="fa-solid fa-box-archive"></i>
-          <span>这条记录没有保存提示词，不能找断点。</span>
+          <span>完整提示词已过期，所以找不到断点。</span>
         </div>
         <div v-else class="wbc-diff-body">
           <div class="wbc-diff-summary" :class="`kind-${diffResult.kind}`">
@@ -215,7 +215,7 @@
           <div v-if="fullText.open" class="wbc-full-text">
             <div class="wbc-full-head">
               <strong>全文高亮</strong>
-              <span v-if="fullText.loading">分批加载中...</span>
+            <span v-if="fullText.loading">正在分批加载...</span>
             </div>
             <div class="wbc-diff-grid">
               <article class="wbc-diff-side">
@@ -400,7 +400,7 @@
     <div v-if="clearConfirmOpen" class="wbm-confirm wbc-modal wbc-confirm-modal" @click.self="cancelClearRecords">
       <section class="wbc-modal-box wbc-confirm-box" role="dialog" aria-modal="true" aria-label="清空缓存记录">
         <h3>清空缓存记录</h3>
-        <p>将删除所有缓存命中记录、提示词快照和统计数据。这个操作不会影响聊天内容或世界书。</p>
+        <p>将删除所有缓存命中记录、已保存的完整提示词和统计数据。这个操作不会影响聊天内容或世界书。</p>
         <div class="wbc-dialog-actions">
           <button class="wbm-small-btn" type="button" :disabled="isClearing" @click="cancelClearRecords">取消</button>
           <button class="wbm-danger-btn" type="button" :disabled="isClearing" @click="confirmClearRecords">
@@ -1142,7 +1142,7 @@ async function ensureSnapshot(id: string): Promise<void> {
   try {
     snapshotCache.set(id, await getPromptSnapshot(id));
   } catch (error) {
-    snapshotError.value = `读取提示词快照失败：${formatError(error)}`;
+    snapshotError.value = `读取完整提示词失败：${formatError(error)}`;
     snapshotCache.set(id, null);
   } finally {
     snapshotLoadingIds.delete(id);
@@ -1249,7 +1249,7 @@ function fullBreakpointId(side: 'before' | 'after'): string {
 function statusLabel(record: CacheSummaryRecord): string {
   if (record.status === 'pending') return '请求中';
   if (record.status === 'failed') return '失败';
-  if (!record.snapshotAvailable) return '快照过期';
+  if (!record.snapshotAvailable) return '只保留统计';
   return displayErrorMessage(record.errorMessage) ?? '完成';
 }
 

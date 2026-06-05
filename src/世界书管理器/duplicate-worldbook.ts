@@ -1454,16 +1454,18 @@ function shortestFamilyName(names: string[]): string {
 }
 
 function formatDuplicateReason(confidence: DuplicateWorldbookConfidence, comparison: CandidateComparison): string {
-  if (confidence === 'exact') return '内容指纹完全一致';
-  if (comparison.smallerCoverage >= HIGH_COVERAGE) return `其中一本已被另一本覆盖 ${formatPercent(comparison.smallerCoverage)}`;
-  if (comparison.similarity >= HIGH_SIMILARITY) return `条目相似度 ${formatPercent(comparison.similarity)}`;
+  if (confidence === 'exact') return '内容完全一样';
+  if (comparison.smallerCoverage >= HIGH_COVERAGE) {
+    return `其中一个世界书基本都在另一个世界书里：${formatPercent(comparison.smallerCoverage)}`;
+  }
+  if (comparison.similarity >= HIGH_SIMILARITY) return `条目很像：${formatPercent(comparison.similarity)}`;
   if (comparison.contentSmallerCoverage >= HIGH_COVERAGE) {
-    return `正文条目覆盖 ${formatPercent(comparison.contentSmallerCoverage)}`;
+    return `正文基本重复：${formatPercent(comparison.contentSmallerCoverage)}`;
   }
   if (confidence === 'medium') {
-    return `正文相似或包含关系 ${formatPercent(Math.max(comparison.textSimilarity, comparison.contentSmallerCoverage))}`;
+    return `正文有明显重复：${formatPercent(Math.max(comparison.textSimilarity, comparison.contentSmallerCoverage))}`;
   }
-  return `疑似重复，正文相似度较低 ${formatPercent(Math.max(comparison.textSimilarity, comparison.contentSmallerCoverage))}`;
+  return `可能重复，但把握较低：${formatPercent(Math.max(comparison.textSimilarity, comparison.contentSmallerCoverage))}`;
 }
 
 function createGroupWarnings(
@@ -1475,16 +1477,16 @@ function createGroupWarnings(
   const warnings: string[] = [];
   const activeDeleteCandidates = deleteCandidates.filter(candidate => candidate.sources.length > 0);
   if (activeDeleteCandidates.length > 0) {
-    warnings.push('待删除版本当前有绑定，应用时会先重绑到保留版本');
+    warnings.push('待删除版本正在被使用，删除前会先改到保留版本');
   }
   if (crossFamily) {
-    warnings.push('候选来自不同名称，已按正文内容判断为疑似重复');
+    warnings.push('这些世界书名字不同，请重点检查内容是不是真的重复');
   }
   if (profile.strategy === 'aggressive') {
-    warnings.push('当前为激进策略，候选会默认勾选，请确认后再应用');
+    warnings.push('激进策略会默认勾选更多候选，应用前请注意');
   }
   if (keepCandidate.versionInfo.versionScore === null) {
-    warnings.push('保留建议未找到明确版本号，已用内容规模作为兜底排序');
+    warnings.push('没有看出明确版本号，暂时按更新时间和内容多少推荐保留版本');
   }
   return warnings;
 }

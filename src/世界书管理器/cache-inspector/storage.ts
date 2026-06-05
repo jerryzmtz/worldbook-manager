@@ -164,7 +164,7 @@ export async function getPromptSnapshot(id: string): Promise<PromptSnapshotRecor
     SNAPSHOT_STORE,
     'readonly',
     store => store.get(id),
-    '读取缓存提示词快照失败',
+    '读取完整提示词失败',
   );
   return record ?? null;
 }
@@ -184,7 +184,7 @@ export async function listCacheRecords(): Promise<CacheRecord[]> {
     SNAPSHOT_STORE,
     'readonly',
     store => store.getAll(),
-    '读取缓存提示词快照失败',
+    '读取完整提示词失败',
   );
   const snapshotMap = new Map(snapshots.map(snapshot => [snapshot.id, snapshot.messages]));
   return summaries.map(summary => ({
@@ -267,14 +267,14 @@ async function collectStaleSnapshotIds(
   try {
     await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction(SNAPSHOT_STORE, 'readonly');
-      transaction.onerror = () => reject(transaction.error ?? new Error('读取缓存提示词快照失败'));
-      transaction.onabort = () => reject(transaction.error ?? new Error('缓存提示词快照读取事务被中止'));
+      transaction.onerror = () => reject(transaction.error ?? new Error('读取完整提示词失败'));
+      transaction.onabort = () => reject(transaction.error ?? new Error('完整提示词读取被中止'));
       const snapshotStore = transaction.objectStore(SNAPSHOT_STORE);
       const cursorSource = snapshotStore.indexNames.contains('timestamp')
         ? snapshotStore.index('timestamp')
         : snapshotStore;
       const request = cursorSource.openCursor(null, 'prev');
-      request.onerror = () => reject(request.error ?? new Error('读取缓存提示词快照失败'));
+      request.onerror = () => reject(request.error ?? new Error('读取完整提示词失败'));
       request.onsuccess = () => {
         const cursor = request.result;
         if (!cursor) {

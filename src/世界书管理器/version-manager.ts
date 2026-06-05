@@ -103,31 +103,31 @@ export const VERSION_IMPORT_SOURCES: VersionImportSource[] = [
   {
     id: 'jsdelivr',
     label: 'jsDelivr 默认',
-    description: '海外和一般网络优先。中国境内如果打不开或缓存异常，建议先换 Fastly 或 GCore。',
+    description: '默认下载源。国内如果打不开、很慢或一直拿到旧版本，可以先换 Fastly 或 GCore。',
     template: `https://cdn.jsdelivr.net/gh/jerryzmtz/worldbook-manager@${VERSION_PLACEHOLDER}/dist/世界书管理器/index.js`,
   },
   {
     id: 'fastly',
     label: 'Fastly，国内优先尝试',
-    description: '中国境内用户优先尝试的备用入口。适合 cdn.jsdelivr.net 被污染、解析慢或缓存不刷新时切换。',
+    description: '国内优先试这个备用入口。适合 jsDelivr 默认源打不开、解析慢或缓存不刷新时切换。',
     template: `https://fastly.jsdelivr.net/gh/jerryzmtz/worldbook-manager@${VERSION_PLACEHOLDER}/dist/世界书管理器/index.js`,
   },
   {
     id: 'gcore',
     label: 'GCore，国内备用',
-    description: '中国境内第二备用入口。不同运营商表现会变，Fastly 不通或很慢时可以试这个。',
+    description: '国内第二备用入口。不同运营商表现会变，Fastly 不通或很慢时可以试这个。',
     template: `https://gcore.jsdelivr.net/gh/jerryzmtz/worldbook-manager@${VERSION_PLACEHOLDER}/dist/世界书管理器/index.js`,
   },
   {
     id: 'testingcf',
     label: 'Cloudflare 测试域',
-    description: '适合排查默认域缓存或解析问题。中国境内不一定稳定，Fastly 和 GCore 都不合适时再试。',
+    description: '用于排查默认源的缓存或解析问题。国内不一定稳定，Fastly 和 GCore 都不合适时再试。',
     template: `https://testingcf.jsdelivr.net/gh/jerryzmtz/worldbook-manager@${VERSION_PLACEHOLDER}/dist/世界书管理器/index.js`,
   },
   {
     id: 'github_raw',
     label: 'GitHub Raw',
-    description: '直接读取 GitHub 原始文件。中国境内通常不推荐直连，主要用于 VPN/代理环境或 CDN 缓存排查。',
+    description: '直接读取 GitHub 原始文件。国内通常不推荐直连，主要给代理环境或排查 CDN 缓存时使用。',
     template: `https://raw.githubusercontent.com/jerryzmtz/worldbook-manager/${VERSION_PLACEHOLDER}/dist/世界书管理器/index.js`,
   },
 ];
@@ -258,17 +258,17 @@ export async function fetchVersionCatalog(options: {
 
 export function inspectCurrentScriptVersion(api: ScriptApi = globalThis as unknown as ScriptApi): ScriptVersionSource {
   if (!api.getScriptId || !api.getScriptTrees) {
-    return { status: 'api_unavailable', message: '当前酒馆助手脚本 API 不可用。' };
+    return { status: 'api_unavailable', message: '现在读不到酒馆助手脚本列表，不能自动更新。' };
   }
 
   let scriptId = '';
   try {
     scriptId = api.getScriptId();
   } catch (error) {
-    return { status: 'error', message: normalizeUnknownError(error, '无法读取当前脚本 ID。') };
+    return { status: 'error', message: normalizeUnknownError(error, '无法确认当前打开的是哪一个脚本。') };
   }
   if (!scriptId) {
-    return { status: 'api_unavailable', message: '当前脚本 ID 不可用。' };
+    return { status: 'api_unavailable', message: '无法确认当前脚本 ID，不能自动更新。' };
   }
 
   const foundScripts: FoundScript[] = [];
@@ -281,10 +281,14 @@ export function inspectCurrentScriptVersion(api: ScriptApi = globalThis as unkno
   }
 
   if (foundScripts.length === 0) {
-    return { status: 'not_found', scriptId, message: '没有在酒馆助手脚本列表中找到当前脚本。' };
+    return { status: 'not_found', scriptId, message: '脚本列表里没找到当前脚本，不能自动更新。' };
   }
   if (foundScripts.length > 1) {
-    return { status: 'ambiguous', scriptId, message: '多个位置都找到了当前脚本，无法安全自动修改。' };
+    return {
+      status: 'ambiguous',
+      scriptId,
+      message: '检测到多个世界书管理器脚本，无法自动更新。建议只保留一个世界书管理器脚本后再试。',
+    };
   }
 
   const [{ script, scope }] = foundScripts;
@@ -332,7 +336,7 @@ export async function replaceCurrentScriptVersion(
       ok: false,
       targetVersion,
       targetImportUrl,
-      reason: '目标版本不是稳定版本 tag。',
+      reason: '目标版本不是正式版本号。',
       source,
     };
   }
@@ -352,7 +356,7 @@ export async function replaceCurrentScriptVersion(
       ok: false,
       targetVersion: normalizedTarget,
       targetImportUrl,
-      reason: '当前酒馆助手脚本写入 API 不可用。',
+      reason: '现在不能写入酒馆助手脚本。',
       source,
     };
   }
@@ -516,9 +520,13 @@ function normalizeJsDelivrVersionTag(value: unknown): string | null {
 }
 
 function sourceStatusMessage(status: ImportParseResult['status']): string {
-  if (status === 'ambiguous') return '脚本中包含多个世界书管理器 import，无法安全自动修改。';
-  if (status === 'unsupported') return '脚本使用的世界书管理器版本格式不支持自动修改。';
-  return '当前脚本不是标准的世界书管理器 jsDelivr import。';
+  if (status === 'ambiguous') {
+    return '当前脚本里有多个世界书管理器 import，无法判断该更新哪一个。请只保留一个 import 后再试。';
+  }
+  if (status === 'unsupported') {
+    return '当前脚本内容不支持直接改版本。请复制目标 import，手动替换脚本里的世界书管理器 import。';
+  }
+  return '当前脚本里没有找到可直接更新的世界书管理器 import。请复制目标 import，手动替换脚本内容。';
 }
 
 function normalizeFetchError(error: unknown, fallback: string): string {

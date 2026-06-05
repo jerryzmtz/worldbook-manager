@@ -64,11 +64,11 @@
       </header>
 
       <div v-if="activePanel === 'optimizer' && !apiReady" class="wbm-alert wbm-alert-error">
-        世界书 API 不可用，无法读取或修改世界书。
+        现在读不到世界书，暂时不能生成或应用修改。
       </div>
 
       <div v-if="activePanel === 'dedupe' && !dedupeApiReady" class="wbm-alert wbm-alert-error">
-        世界书去重 API 不可用，无法读取或删除世界书。
+        现在读不到世界书，暂时不能生成去重方案。
       </div>
 
       <CacheInspectorPanel v-if="activePanel === 'cacheInspector'" />
@@ -197,7 +197,7 @@
           <section class="wbm-panel wbm-rules-panel wbm-dedupe-rule-panel" data-wbm-tutorial="dedupe-rules">
             <div class="wbm-panel-title">
               <h3>规则区</h3>
-              <span class="wbm-inline-stat">{{ currentDedupeStrategyOption.label }} · 最新版本优先</span>
+              <span class="wbm-inline-stat">{{ currentDedupeStrategyOption.label }} · 默认保留较新的版本</span>
             </div>
             <div class="wbm-preset wbm-dedupe-preset">
               <div class="wbm-mode-switch wbm-dedupe-strategy-switch" aria-label="世界书去重策略">
@@ -1397,7 +1397,7 @@
           <p>
             将处理 {{ dedupeConfirmState.groupCount }} 组重复候选，删除
             {{ dedupeConfirmState.deleteCount }} 本旧版本世界书。
-            删除前，会先把正在使用这些旧世界书的地方改成保留版本。
+            删除前，会先改绑关联角色卡的世界书绑定。
             本次预计会更新 {{ dedupeConfirmState.characterRebindCount }} 张角色卡的世界书绑定。
           </p>
           <div class="wbm-dialog-actions">
@@ -1416,7 +1416,7 @@
           <p>
             应用后将有 {{ postApplyBlueTokenStats.count }} 个蓝灯条目，预计
             {{ postApplyBlueTokenStats.tokenLabel }} {{ postApplyBlueTokenStats.formattedTokenCount }}，已超过
-            {{ blueTokenWarningThresholdLabel }}Tokens。应用修改可能导致上下文超限或AI请求直接失败，是否继续应用修改？
+            {{ blueTokenWarningThresholdLabel }} Tokens。应用修改可能导致上下文超限，或让 AI 请求直接失败。是否继续？
           </p>
           <label class="wbm-toggle-line wbm-confirm-option">
             <input v-model="blueTokenWarningState.doNotShowAgain" type="checkbox" />
@@ -2476,10 +2476,10 @@ const scriptVersionSourceLabel = computed(() => {
   const source = scriptVersionSource.value;
   if (source.status === 'versioned') return `${source.specifier} · ${formatVersionImportSource(source.importTemplate)} · ${formatScriptScope(source.scope)}`;
   if (source.status === 'main') return `main · ${formatVersionImportSource(source.importTemplate)} · ${formatScriptScope(source.scope)}`;
-  if (source.status === 'api_unavailable') return '脚本 API 不可用';
+  if (source.status === 'api_unavailable') return '不能自动更新';
   if (source.status === 'not_found') return '未找到当前脚本';
   if (source.status === 'ambiguous') return '脚本位置不唯一';
-  if (source.status === 'no_import') return '非标准入口';
+  if (source.status === 'no_import') return '未找到入口';
   if (source.status === 'unsupported') return '版本格式不支持';
   return '检查失败';
 });
@@ -2488,9 +2488,9 @@ const scriptVersionSourceHint = computed(() => {
   if (source.status === 'versioned') {
     return getKnownVersionImportSourceByTemplate(source.importTemplate)
       ? null
-      : '当前脚本使用自定义分发源；本次更新或回退会沿用你在下方选择的分发源。';
+      : '当前脚本使用自定义下载源；本次更新或回退会改用你在下方选择的下载源。';
   }
-  if (source.status === 'main') return '当前使用 main，无法精确说明正在运行的 tag；选择列表中的版本后会改成固定版本。';
+  if (source.status === 'main') return '当前使用 main，不能确认具体版本；选择列表中的版本后，会改成固定版本。';
   return source.message;
 });
 const scriptVersionSourceTone = computed(() => {
@@ -2728,7 +2728,7 @@ const includeDisabledEntriesForCache = computed(
 );
 
 const validationMessage = computed(() => {
-  if (!apiReady.value) return '世界书 API 不可用。';
+  if (!apiReady.value) return '现在读不到世界书。';
   if (optimizerTargetWorldbookNames.value.length === 0) return '请至少选择一本世界书。';
   return '';
 });
@@ -2832,18 +2832,18 @@ const canApplyDedupe = computed(
 );
 
 const dedupeSummaryLabel = computed(() => {
-  if (dedupeGroups.value.length === 0) return '尚未生成方案';
+  if (dedupeGroups.value.length === 0) return '还没有生成方案';
   const lowCount = dedupeGroups.value.filter(group => group.confidence === 'low').length;
-  return `候选 ${dedupeGroups.value.length} 组 · 默认删除 ${dedupeSelectedDeleteCount.value} 本 · 低置信度 ${lowCount} 组`;
+  return `找到 ${dedupeGroups.value.length} 组候选 · 勾选删除 ${dedupeSelectedDeleteCount.value} 本 · 低把握 ${lowCount} 组`;
 });
 
 const dedupeSelectionLabel = computed(() => {
-  if (dedupeGroups.value.length === 0) return `已选择 ${selectedBooks.value.size} 本用于扫描`;
-  return `已勾选 ${dedupeSelectedGroups.value.length} 组 · 待删除 ${dedupeSelectedDeleteCount.value} 本`;
+  if (dedupeGroups.value.length === 0) return `已选择 ${selectedBooks.value.size} 本，生成方案后再检查`;
+  return `已勾选 ${dedupeSelectedGroups.value.length} 组 · 准备删除 ${dedupeSelectedDeleteCount.value} 本`;
 });
 
 const dedupeEmptyText = computed(() =>
-  selectedBooks.value.size < 2 ? '至少选择两本世界书后再生成方案。' : '还没有发现可处理的重复候选。',
+  selectedBooks.value.size < 2 ? '至少选择两本世界书后再生成方案。' : '没有找到可以处理的重复候选。',
 );
 
 const visiblePreviewRows = computed(() => {
@@ -3284,9 +3284,9 @@ async function confirmVersionSwitch(): Promise<void> {
       return;
     }
 
-    notifyError(`${result.reason} 请点击目标 import 旁的「复制」，然后粘贴到酒馆助手本脚本的内容栏。`);
+    notifyError(`${result.reason} 请点击目标 import 旁的「复制」，再粘贴到酒馆助手里这个脚本的内容栏。`);
   } catch (error) {
-    notifyError(`${formatError(error)} 请点击目标 import 旁的「复制」，然后粘贴到酒馆助手本脚本的内容栏。`);
+    notifyError(`${formatError(error)} 请点击目标 import 旁的「复制」，再粘贴到酒馆助手里这个脚本的内容栏。`);
   } finally {
     versionDialog.busy = false;
   }
@@ -3668,7 +3668,7 @@ function collectActiveBookSources(availableNames: string[]): Record<string, Book
       addMany(getLorebookSettings().selected_global_lorebooks, 'global');
     }
   } catch (error) {
-    notifyError(`读取全局世界书绑定失败：${formatError(error)}`);
+    notifyError(`读取全局世界书失败：${formatError(error)}`);
   }
 
   try {
@@ -3823,12 +3823,12 @@ function bookSourceBadges(name: string): BookSourceBadge[] {
     character_primary: {
       value: 'character_primary',
       label: '角色',
-      title: '角色世界书：随角色绑定，导出角色时会随卡带走',
+      title: '角色世界书：导出角色卡时会内嵌到角色卡中',
     },
     character_additional: {
       value: 'character_additional',
       label: '附加',
-      title: '角色附加世界书：随角色绑定，但不是主世界书',
+      title: '角色附加世界书：与角色卡绑定，但不会内嵌到角色卡中',
     },
     global: { value: 'global', label: '全局', title: '全局世界书：通过全局选择器启用' },
   };
@@ -4211,7 +4211,7 @@ async function generateDedupePreview(): Promise<void> {
     }
 
     throwIfDedupeScanAborted(controller.signal);
-    setDedupeScanProgress('finalize', 0, 1, '正在读取角色卡绑定', { running: true });
+    setDedupeScanProgress('finalize', 0, 1, '正在检查角色卡世界书绑定', { running: true });
     characterWorldbookBindings.value = await collectAllCharacterWorldbookBindings();
     throwIfDedupeScanAborted(controller.signal);
     const plan = await createDuplicateWorldbookPlanAsync(snapshots, toDedupeSourceMap(bookSources.value), {
@@ -4232,7 +4232,7 @@ async function generateDedupePreview(): Promise<void> {
       notifyError(`部分世界书读取失败：${failures.slice(0, 3).join('；')}`);
     }
     if (plan.groups.length === 0) {
-      notifyInfo('没有发现可处理的世界书重复候选。');
+      notifyInfo('没有找到可以处理的重复世界书。');
     }
     resetDedupeScanProgress(true);
   } catch (error) {
@@ -4409,7 +4409,7 @@ async function applyDedupeChanges(): Promise<void> {
             worldbook,
             reboundSources: [],
             failed: true,
-            errorMessage: `重绑失败：${formatError(error)}`,
+            errorMessage: `更新绑定失败：${formatError(error)}`,
           })),
         );
         continue;
@@ -4418,7 +4418,7 @@ async function applyDedupeChanges(): Promise<void> {
       for (const worldbook of deleteNames) {
         try {
           const deleted = await deleteWorldbook(worldbook);
-          if (!deleted) throw new Error('删除接口返回失败');
+          if (!deleted) throw new Error('删除失败，酒馆没有确认已删除');
           results.push({
             groupId: group.id,
             keepName,
@@ -4470,22 +4470,22 @@ async function rebindWorldbookReferences(deleteNames: string[], keepName: string
   const plan = createDuplicateWorldbookRebindPlan(deleteNames, keepName, bindings);
 
   if (plan.globalNames) {
-    if (typeof rebindGlobalWorldbooks !== 'function') throw new Error('全局世界书重绑 API 不可用');
+    if (typeof rebindGlobalWorldbooks !== 'function') throw new Error('现在不能更新全局世界书绑定');
     await rebindGlobalWorldbooks(plan.globalNames);
   }
 
   if (plan.charWorldbooks) {
-    if (typeof rebindCharWorldbooks !== 'function') throw new Error('角色世界书重绑 API 不可用');
+    if (typeof rebindCharWorldbooks !== 'function') throw new Error('现在不能更新当前角色的世界书绑定');
     await rebindCharWorldbooks('current', plan.charWorldbooks);
   }
 
   if (plan.chatName) {
-    if (typeof rebindChatWorldbook !== 'function') throw new Error('聊天世界书重绑 API 不可用');
+    if (typeof rebindChatWorldbook !== 'function') throw new Error('现在不能更新当前聊天的世界书绑定');
     await rebindChatWorldbook('current', plan.chatName);
   }
 
   if (plan.characterUpdates && plan.characterUpdates.length > 0) {
-    if (typeof updateCharacterWith !== 'function') throw new Error('角色卡世界书重绑 API 不可用');
+    if (typeof updateCharacterWith !== 'function') throw new Error('现在不能更新角色卡的世界书绑定');
     const deleted = new Set(deleteNames);
     const skippedCharacters: string[] = [];
     const context = getSillyTavernContext();
@@ -4496,7 +4496,7 @@ async function rebindWorldbookReferences(deleteNames: string[], keepName: string
           await context.writeExtensionField(update.characterIndex, 'world', keepName);
           writtenByIndex = true;
         } catch (error) {
-          console.warn('[世界书智能去重] 按角色索引更新主世界书失败，尝试使用角色 API 兜底。', {
+          console.warn('[世界书智能去重] 按角色列表位置更新世界书绑定失败，尝试用角色 API 再更新一次。', {
             characterName: update.characterName,
             characterId: update.characterId,
             error,
@@ -4525,7 +4525,7 @@ async function rebindWorldbookReferences(deleteNames: string[], keepName: string
     }
     if (skippedCharacters.length > 0) {
       console.warn(
-        `[世界书智能去重] ${skippedCharacters.length} 张角色卡在应用时无法重新定位，已跳过世界书重绑：${skippedCharacters
+        `[世界书智能去重] ${skippedCharacters.length} 张角色卡在应用时找不到了，已跳过这些角色卡的世界书绑定更新：${skippedCharacters
           .slice(0, 5)
           .join('、')}`,
       );
@@ -4948,7 +4948,7 @@ async function verifyWorldbookSaved(bookName: string, expectedEntries: Worldbook
       (entry, index) => entry.uid === expectedEntries[index].uid && sameManagedEntry(entry, expectedEntries[index]),
     );
   if (!isSame) {
-    throw new Error('世界书保存后复读校验失败，已阻止继续报告成功');
+    throw new Error('世界书保存后校验失败，已停止继续应用，避免误报成功');
   }
 }
 

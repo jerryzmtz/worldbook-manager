@@ -67,14 +67,14 @@ const WORLDBOOK_STEPS: TutorialStep[] = [
     selector: '.wbm-dialog',
     title: '世界书缓存优化器',
     content:
-      '这个工具会读取选中的世界书，按 DeepSeek V4 缓存友好的规则来修改世界书。在真正修改世界书之前，你可以逐条检查脚本建议的改动。',
+      '这个工具会读取你选中的世界书，先给出修改建议。真正写入前，你可以逐条检查，觉得不合适的可以跳过。',
     placement: 'center',
   },
   {
     selector: '[data-wbm-tutorial="version-manager"]',
     title: '版本管理',
     content:
-      '标题旁边的旋转箭头会在后台检查脚本版本。有新版本时按钮会发亮；点击后可以更新到最新版，也可以选择旧版本回退、锁定或切换分发源。',
+      '标题旁边的旋转箭头会检查脚本版本。有新版本时按钮会发亮；点进去可以更新、回退旧版本、锁定版本，或换一个下载源。',
     placement: 'bottom',
   },
   {
@@ -94,32 +94,32 @@ const WORLDBOOK_STEPS: TutorialStep[] = [
     selector: '.wbm-rules-panel',
     title: '切换优化规则',
     content:
-      '这里可以切换“优化缓存”和“优化提示词构建速度”。下方会展示当前模式会怎么处理世界书；点右上角的说明按钮可以查看每条规则的详细说明。',
+      '这里可以切换“优化缓存”和“优化提示词构建速度”。下方会告诉你当前模式会改什么；右上角的说明按钮可以看每条规则的细节。',
     placement: 'left',
   },
   {
     selector: '.wbm-preview-actions',
     title: '生成方案',
-    content: '点击后，脚本会先生成并展示修改建议，不会立刻修改世界书。下拉菜单可以切换过滤器和排序。',
+    content: '点击后只会生成修改建议，不会立刻写入世界书。下拉菜单可以筛选和排序这些建议。',
     placement: 'bottom',
   },
   {
     selector: ['.wbm-table-wrap', '.wbm-card-list'],
     title: '检查修改意见',
-    content: '修改意见区会显示建议修改条目在修改前、修改后的插入位置、插入顺序，以及检测到的变量、宏等动态内容。点击三角符号可展开条目的具体内容，点击铅笔图标可以编辑条目正文。',
+    content: '这里会显示每条建议改哪里、改成什么，以及有没有变量、宏这类会变化的内容。点三角可以看正文，点铅笔可以直接改正文。',
     placement: 'top',
   },
   {
     selector: ['.wbm-action-cell', '.wbm-mobile-action'],
     title: '调整修改后',
     content:
-      '“修改后”下拉可以改成禁用、保持原样或自定义。自定义弹窗只覆盖灯色、位置、order、概率等会被本工具写入的字段。',
+      '“修改后”下拉可以改成禁用、保持原样或自定义。自定义只会改这个工具负责写入的字段，比如灯色、位置、order 和概率。',
     placement: 'left',
   },
   {
     selector: '[data-wbm-tutorial="structure"]',
     title: '结构图',
-    content: '结构图按提示词位置来可视化修改前后的条目插入位置。悬浮或单击修改前的特定插入位置以进行高亮显示。',
+    content: '结构图会把修改前后的插入位置画出来。悬浮或点击某个位置，可以高亮它改到了哪里。',
     placement: 'bottom',
   },
   {
@@ -141,21 +141,20 @@ const CACHE_INSPECTOR_STEPS: TutorialStep[] = [
   {
     selector: '[data-wbm-cache-tutorial="overview"]',
     title: '统计概览',
-    content:
-      '顶部统计会跟随当前筛选条件变化而变化。',
+    content: '顶部统计只计算当前筛选出来的记录。',
     placement: 'bottom',
   },
   {
     selector: '[data-wbm-cache-tutorial="filters"]',
     title: '筛选记录',
-    content: '可以按模型、缓存率和是否保有完整提示词来筛选。脚本默认只保留最近80条的完整提示词以供对比。',
+    content: '可以按模型、缓存率和是否保存了完整提示词来筛选。脚本默认只保存最近 80 条完整提示词，用来做断点对比。',
     placement: 'bottom',
   },
   {
     selector: '[data-wbm-cache-tutorial="records"]',
     title: '请求记录',
     content:
-      '每条记录显示命中率、模型、提示词长度、token 和估算费用。最近80条提示词会保留完整记录以对比断点；过老的提示词记录只保留统计数据。',
+      '每条记录会显示命中率、模型、提示词长度、token 和估算费用。最近 80 条可以做断点对比；更早的记录只保留统计数据。',
     placement: 'right',
   },
   {
@@ -174,7 +173,7 @@ const CACHE_INSPECTOR_STEPS: TutorialStep[] = [
     selector: '[data-wbm-cache-tutorial="diff"]',
     title: '断点对比',
     content:
-      '对比器默认只找第一处差异。未展开全文时，“跳到断点”会跳到摘要高亮；展开全文后会跳到全文高亮。',
+      '对比器会先找第一处差异。未展开全文时，“跳到断点”会跳到摘要高亮；展开全文后会跳到全文里的高亮位置。',
     placement: 'left',
   },
   {
@@ -201,31 +200,31 @@ const DEDUPE_STEPS: TutorialStep[] = [
   {
     selector: '[data-wbm-tutorial="dedupe-selection"]',
     title: '批量选择',
-    content: '自动选择会按当前绑定挑出常用世界书。全选只选择当前列表里看得见的结果，清空会取消所有选择。',
+    content: '自动选择会选中当前正在使用的世界书。全选只选择当前列表里看得见的结果，清空会取消所有选择。',
     placement: 'bottom',
   },
   {
     selector: '[data-wbm-tutorial="dedupe-rules"]',
     title: '选择策略',
-    content: '保守误报少，平衡适合默认使用，激进会找出更多可疑重复，也更需要你检查。',
+    content: '保守最安全不会误报，平衡适合默认使用，激进会找到尽可能多的重复，应用前请确认。',
     placement: 'left',
   },
   {
     selector: '[data-wbm-tutorial="dedupe-generate"]',
     title: '生成方案',
-    content: '点击后只会生成候选方案。方案出来前，不会重绑角色卡，也不会删除世界书。',
+    content: '点击后只会生成候选方案。方案出来前，不会改角色卡绑定，也不会删除世界书。',
     placement: 'bottom',
   },
   {
     selector: '[data-wbm-tutorial="dedupe-groups"]',
     title: '检查候选',
-    content: '这里会显示置信度、相似度、绑定来源和警告。低置信度或跨名称候选，应用前要多看一眼。',
+    content: '这里会显示置信度、相似度、绑定来源和警告。低置信度或跨名称候选，应用前请小心。',
     placement: 'top',
   },
   {
     selector: '[data-wbm-tutorial="dedupe-apply"]',
     title: '确认应用',
-    content: '确认后才会先重绑引用，再删除旧世界书。仍然不确定的候选，可以先取消勾选。',
+    content: '确认后才会先把绑定改到保留版本，再删除旧世界书。仍然不确定的候选，可以先取消勾选。',
     placement: 'bottom',
   },
 ];
