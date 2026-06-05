@@ -77,9 +77,16 @@ const WORLDBOOK_STEPS: TutorialStep[] = [
     placement: 'bottom',
   },
   {
+    selector: '[data-wbm-tutorial="optimizer-settings"]',
+    title: '优化设置',
+    content:
+      '齿轮按钮用于调整优化器的默认行为，包括缓存优化是否处理禁用条目，以及每次打开时默认选择哪类世界书。',
+    placement: 'bottom',
+  },
+  {
     selector: '.wbm-books-panel',
     title: '选择世界书',
-    content: '先在这里选择要优化的世界书。建议通过自动选择来选中当前聊天、全局世界书和聊天世界书。',
+    content: '先在这里选择要优化的世界书。自动选择会按照优化设置，选中全局、角色、聊天等指定类别的世界书。',
     placement: 'right',
   },
   {

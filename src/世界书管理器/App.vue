@@ -28,6 +28,18 @@
         </div>
         <div class="wbm-header-actions">
           <button
+            v-if="activePanel === 'optimizer'"
+            class="wbm-icon-btn"
+            type="button"
+            title="优化设置"
+            aria-label="优化设置"
+            :disabled="isBusy"
+            data-wbm-tutorial="optimizer-settings"
+            @click="openOptimizerSettings"
+          >
+            <i class="fa-solid fa-gear"></i>
+          </button>
+          <button
             v-if="activePanel === 'optimizer' || activePanel === 'cacheInspector'"
             class="wbm-icon-btn wbm-tutorial-trigger"
             type="button"
@@ -403,7 +415,12 @@
             </div>
 
             <div class="wbm-row-actions">
-              <button class="wbm-small-btn" type="button" :disabled="isBusy || !apiReady" @click="selectActiveBooks">
+              <button
+                class="wbm-small-btn"
+                type="button"
+                :disabled="isBusy || !apiReady"
+                @click="selectDefaultOptimizerBooks"
+              >
                 自动选择
               </button>
               <button
@@ -1036,6 +1053,79 @@
       </div>
 
       <div
+        v-if="activePanel === 'optimizer' && optimizerSettingsOpen"
+        class="wbm-confirm wbm-optimizer-settings-modal"
+        @click.self="closeOptimizerSettings"
+      >
+        <div class="wbm-confirm-box wbm-optimizer-settings-box" role="dialog" aria-modal="true" aria-label="优化设置">
+          <header class="wbm-rule-help-head">
+            <div>
+              <h3>优化设置</h3>
+              <p>调整缓存优化的条目范围和默认书单。</p>
+            </div>
+            <button class="wbm-icon-btn" type="button" title="关闭优化设置" @click="closeOptimizerSettings">
+              <i class="fa-solid fa-times"></i>
+            </button>
+          </header>
+
+          <section class="wbm-optimizer-settings-group">
+            <h4>优化缓存条目范围</h4>
+            <div class="wbm-settings-choice-list" role="radiogroup" aria-label="优化缓存条目范围">
+              <label
+                v-for="option in CACHE_ENTRY_SCOPE_OPTIONS"
+                :key="option.value"
+                class="wbm-settings-choice"
+                :class="{ active: cacheEntryScope === option.value }"
+              >
+                <input
+                  v-model="cacheEntryScope"
+                  type="radio"
+                  name="wbm-cache-entry-scope"
+                  :value="option.value"
+                  :disabled="isBusy"
+                />
+                <span>
+                  <strong>{{ option.label }}</strong>
+                  <small>{{ option.description }}</small>
+                </span>
+              </label>
+            </div>
+          </section>
+
+          <section class="wbm-optimizer-settings-group">
+            <h4>默认选择世界书</h4>
+            <div class="wbm-settings-choice-list" role="radiogroup" aria-label="默认选择世界书">
+              <label
+                v-for="option in DEFAULT_WORLD_BOOK_SELECTION_OPTIONS"
+                :key="option.value"
+                class="wbm-settings-choice"
+                :class="{ active: defaultWorldbookSelection === option.value }"
+              >
+                <input
+                  v-model="defaultWorldbookSelection"
+                  type="radio"
+                  name="wbm-default-worldbook-selection"
+                  :value="option.value"
+                  :disabled="isBusy"
+                />
+                <span>
+                  <strong>{{ option.label }}</strong>
+                  <small>{{ option.description }}</small>
+                </span>
+              </label>
+            </div>
+          </section>
+
+          <div class="wbm-dialog-actions">
+            <button class="wbm-small-btn" type="button" :disabled="isBusy || !apiReady" @click="selectDefaultOptimizerBooks">
+              按设置自动选择
+            </button>
+            <button class="wbm-primary-btn" type="button" @click="closeOptimizerSettings">完成</button>
+          </div>
+        </div>
+      </div>
+
+      <div
         v-if="activePanel === 'optimizer' && ruleHelpOpen"
         class="wbm-confirm wbm-rule-help-modal"
         @click.self="closeRuleHelp"
@@ -1476,7 +1566,7 @@ import {
   type VersionRelation,
 } from './version-manager';
 
-const APP_VERSION = 'v3.24';
+const APP_VERSION = 'v3.26';
 const EMPTY_VERSION_CATALOG: VersionCatalog = {
   latestVersion: null,
   versions: [],
@@ -1486,6 +1576,8 @@ const EMPTY_VERSION_CATALOG: VersionCatalog = {
 
 type ActivePanel = 'optimizer' | 'cacheInspector' | 'dedupe';
 type OptimizerMode = 'cache' | 'prompt_build_speed';
+type CacheEntryScope = 'enabled' | 'all';
+type DefaultWorldbookSelection = 'active' | 'global' | 'character' | 'chat';
 type PreviewStatus = 'changed' | 'unchanged' | 'filtered' | 'failed';
 type PreviewFilter = 'changed' | 'review' | 'all';
 type StructureGraphMode = 'changed' | 'all';
@@ -1626,7 +1718,7 @@ type DedupeConfirmState = {
 };
 
 type LoadWorldbooksOptions = {
-  defaultSelection?: 'active' | 'all';
+  defaultSelection?: DefaultWorldbookSelection | 'all';
 };
 
 type ConfirmState = {
@@ -1646,6 +1738,8 @@ type OptimizerFilterPreference = {
   bookSourceFilter: BookSourceFilter;
   previewFilter: PreviewFilter;
   previewSortMode: PreviewSortMode;
+  cacheEntryScope: CacheEntryScope;
+  defaultWorldbookSelection: DefaultWorldbookSelection;
 };
 
 type CustomStrategyType = Extract<WorldbookEntry['strategy']['type'], 'constant' | 'selective'>;
@@ -1751,6 +1845,10 @@ type BookPlan = {
   rows: PreviewChange[];
   entries: WorldbookEntry[];
   changedCount: number;
+};
+
+type BuildBookPlanOptions = {
+  includeDisabledEntries?: boolean;
 };
 
 type WorldbookImplicitFields = {
@@ -1888,6 +1986,44 @@ const OPTIMIZER_MODE_OPTIONS: OptimizerModeOption[] = [
     label: '优化提示词构建速度',
     subtitle: '合并同位置蓝灯条目',
     icon: 'fa-layer-group',
+  },
+];
+const CACHE_ENTRY_SCOPE_OPTIONS: Array<{ value: CacheEntryScope; label: string; description: string }> = [
+  {
+    value: 'enabled',
+    label: '仅处理启用条目',
+    description: '保持默认行为，禁用条目不进入缓存优化规则。',
+  },
+  {
+    value: 'all',
+    label: '处理所有条目',
+    description: '当前选中的世界书内，禁用条目也参与试算；应用后仍保持禁用。',
+  },
+];
+const DEFAULT_WORLD_BOOK_SELECTION_OPTIONS: Array<{
+  value: DefaultWorldbookSelection;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: 'active',
+    label: '全局 + 角色 + 聊天',
+    description: '打开优化器时默认选择当前启用的全部世界书。',
+  },
+  {
+    value: 'character',
+    label: '仅角色世界书',
+    description: '默认选择当前角色主世界书和附加世界书。',
+  },
+  {
+    value: 'global',
+    label: '仅全局世界书',
+    description: '默认选择当前启用的全局世界书。',
+  },
+  {
+    value: 'chat',
+    label: '仅聊天世界书',
+    description: '默认选择当前聊天绑定的世界书。',
   },
 ];
 const DEFAULT_WORLDBOOK_IMPLICIT_FIELDS: WorldbookImplicitFields = {
@@ -2067,6 +2203,10 @@ const bookFilter = ref('');
 const bookSortMode = ref<BookSortMode>('default');
 const selectedBookSortRank = ref<Record<string, number>>({});
 const bookSourceFilter = ref<BookSourceFilter>(optimizerFilterPreference.bookSourceFilter);
+const cacheEntryScope = ref<CacheEntryScope>(optimizerFilterPreference.cacheEntryScope);
+const defaultWorldbookSelection = ref<DefaultWorldbookSelection>(
+  optimizerFilterPreference.defaultWorldbookSelection,
+);
 const worldbookNames = ref<string[]>([]);
 const selectedBooks = ref<Set<string>>(new Set());
 const bookSources = ref<Record<string, BookSource[]>>({});
@@ -2090,6 +2230,7 @@ const customEntryOverrides = ref<Record<string, CustomEntryOverride>>({});
 const contentEditOverrides = ref<Record<string, string>>({});
 const contentEditDrafts = ref<Record<string, string>>({});
 const ruleHelpOpen = ref(false);
+const optimizerSettingsOpen = ref(false);
 const confirmState = reactive<ConfirmState>({ open: false, bookCount: 0, changeCount: 0, doNotShowAgain: false });
 const applyWarningDismissed = ref(readApplyWarningDismissed());
 const blueTokenWarningState = reactive<BlueTokenWarningState>({ open: false, doNotShowAgain: false });
@@ -2450,9 +2591,17 @@ const activeWorldbookNames = computed(() =>
   worldbookNames.value.filter(name => (bookSources.value[name] ?? []).length > 0),
 );
 
+const optimizerTargetWorldbookNames = computed(() =>
+  [...selectedBooks.value].filter(name => worldbookNames.value.includes(name)),
+);
+
+const includeDisabledEntriesForCache = computed(
+  () => optimizerMode.value === 'cache' && cacheEntryScope.value === 'all',
+);
+
 const validationMessage = computed(() => {
   if (!apiReady.value) return '世界书 API 不可用。';
-  if (selectedBooks.value.size === 0) return '请至少选择一本世界书。';
+  if (optimizerTargetWorldbookNames.value.length === 0) return '请至少选择一本世界书。';
   return '';
 });
 
@@ -2890,6 +3039,7 @@ function closeManager(): void {
   tutorial.close();
   cacheInspectorTutorial.close();
   ruleHelpOpen.value = false;
+  optimizerSettingsOpen.value = false;
   confirmState.open = false;
   blueTokenWarningState.open = false;
   dedupeConfirmState.open = false;
@@ -2898,7 +3048,28 @@ function closeManager(): void {
   closeCustomEditor();
 }
 
-watch([optimizerMode, bookSourceFilter, previewFilter, previewSortMode], persistOptimizerFilterPreference);
+watch(
+  [optimizerMode, bookSourceFilter, previewFilter, previewSortMode, cacheEntryScope, defaultWorldbookSelection],
+  persistOptimizerFilterPreference,
+);
+
+watch(cacheEntryScope, () => {
+  previewRows.value = [];
+  applyResults.value = [];
+  structureState.open = false;
+  structureHighlightSource.value = null;
+  resetPreviewManualState();
+});
+
+function openOptimizerSettings(): void {
+  closeTransientModals();
+  optimizerSettingsOpen.value = true;
+  scheduleModalViewportSync();
+}
+
+function closeOptimizerSettings(): void {
+  optimizerSettingsOpen.value = false;
+}
 
 function openVersionManager(): void {
   versionDialog.open = true;
@@ -3170,8 +3341,8 @@ async function loadWorldbooks(options: LoadWorldbooksOptions = {}): Promise<void
     bookSources.value = collectActiveBookSources(worldbookNames.value);
     pruneBookMetadata(worldbookNames.value);
     if (!selectionInitialized.value) {
-      selectedBooks.value =
-        options.defaultSelection === 'all' ? new Set(worldbookNames.value) : new Set(activeWorldbookNames.value);
+      const defaultSelection = options.defaultSelection ?? defaultWorldbookSelection.value;
+      selectedBooks.value = new Set(worldbookNamesForDefaultSelection(defaultSelection));
       selectionInitialized.value = true;
     } else {
       selectedBooks.value = new Set([...selectedBooks.value].filter(name => worldbookNames.value.includes(name)));
@@ -3258,6 +3429,47 @@ async function selectActiveBooks(): Promise<void> {
     notifyInfo(`已自动选择当前启用世界书：${activeNames.length} 本。`);
   }
   resetDedupeState();
+}
+
+async function selectDefaultOptimizerBooks(): Promise<void> {
+  if (!apiReady.value) return;
+  if (worldbookNames.value.length === 0) {
+    await loadWorldbooks();
+  } else {
+    refreshBookSources();
+  }
+  const names = worldbookNamesForDefaultSelection(defaultWorldbookSelection.value);
+  selectedBooks.value = new Set(names);
+  previewRows.value = [];
+  expandedPreviewIds.value = new Set();
+  editingContentIds.value = new Set();
+  entryActionOverrides.value = {};
+  customEntryOverrides.value = {};
+  contentEditOverrides.value = {};
+  contentEditDrafts.value = {};
+  closeCustomEditor();
+  const option = DEFAULT_WORLD_BOOK_SELECTION_OPTIONS.find(item => item.value === defaultWorldbookSelection.value);
+  notifyInfo(
+    names.length === 0
+      ? '没有检测到符合默认设置的世界书。'
+      : `已按「${option?.label ?? '默认设置'}」选择 ${names.length} 本。`,
+  );
+  resetDedupeState();
+}
+
+function worldbookNamesForDefaultSelection(selection: DefaultWorldbookSelection | 'all'): string[] {
+  if (selection === 'all') return worldbookNames.value;
+  return worldbookNames.value.filter(name => matchesDefaultWorldbookSelection(name, selection));
+}
+
+function matchesDefaultWorldbookSelection(name: string, selection: DefaultWorldbookSelection): boolean {
+  const sources = bookSources.value[name] ?? [];
+  if (selection === 'active') return sources.length > 0;
+  if (selection === 'global') return sources.includes('global');
+  if (selection === 'character') {
+    return sources.includes('character_primary') || sources.includes('character_additional');
+  }
+  return sources.includes('chat');
 }
 
 function collectActiveBookSources(availableNames: string[]): Record<string, BookSource[]> {
@@ -3937,7 +4149,7 @@ async function generatePreview(options: GeneratePreviewOptions = {}): Promise<vo
   if (!options.preserveScroll) applyResults.value = [];
   const rows: PreviewChange[] = [];
   try {
-    for (const bookName of selectedBooks.value) {
+    for (const bookName of optimizerTargetWorldbookNames.value) {
       try {
         const entries = await getWorldbook(bookName);
         if (entries.length === 0) {
@@ -3946,7 +4158,9 @@ async function generatePreview(options: GeneratePreviewOptions = {}): Promise<vo
         }
         const plan = isPromptBuildSpeedMode.value
           ? buildPromptBuildSpeedBookPlan(bookName, entries)
-          : buildBookPlan(bookName, entries, true);
+          : buildBookPlan(bookName, entries, true, {
+              includeDisabledEntries: includeDisabledEntriesForCache.value,
+            });
         rows.push(...plan.rows);
       } catch (error) {
         rows.push(createFailedRow(bookName, formatError(error)));
@@ -4049,6 +4263,7 @@ function closeRuleHelp(): void {
 
 function closeTransientModals(): void {
   ruleHelpOpen.value = false;
+  optimizerSettingsOpen.value = false;
   confirmState.open = false;
   blueTokenWarningState.open = false;
   dedupeConfirmState.open = false;
@@ -4144,12 +4359,14 @@ async function applyChangesDirect(): Promise<void> {
   const results: ApplyResult[] = [];
   let mergeReducedCount = 0;
   try {
-    for (const bookName of selectedBooks.value) {
+    for (const bookName of optimizerTargetWorldbookNames.value) {
       try {
         const entries = await getWorldbook(bookName);
         const plan = isPromptBuildSpeedMode.value
           ? buildPromptBuildSpeedBookPlan(bookName, entries)
-          : buildBookPlan(bookName, entries, false);
+          : buildBookPlan(bookName, entries, false, {
+              includeDisabledEntries: includeDisabledEntriesForCache.value,
+            });
         const changedCount = plan.changedCount;
         if (changedCount > 0) {
           if (isPromptBuildSpeedMode.value) {
@@ -4383,12 +4600,20 @@ function readOptimizerFilterPreference(): OptimizerFilterPreference {
     bookSourceFilter: 'all',
     previewFilter: 'changed',
     previewSortMode: 'custom',
+    cacheEntryScope: 'enabled',
+    defaultWorldbookSelection: 'active',
   };
   try {
     const raw = window.localStorage?.getItem(OPTIMIZER_FILTER_PREF_KEY);
     if (!raw) return fallback;
     const value = JSON.parse(raw);
     if (!isRecord(value)) return fallback;
+    const cacheEntryScope =
+      isCacheEntryScope(value.cacheEntryScope)
+        ? value.cacheEntryScope
+        : value.optimizeAllWorldbookEntries === true
+          ? 'all'
+          : fallback.cacheEntryScope;
     return {
       optimizerMode: isOptimizerMode(value.optimizerMode) ? value.optimizerMode : fallback.optimizerMode,
       bookSourceFilter: isBookSourceFilter(value.bookSourceFilter)
@@ -4396,6 +4621,10 @@ function readOptimizerFilterPreference(): OptimizerFilterPreference {
         : fallback.bookSourceFilter,
       previewFilter: isPreviewFilter(value.previewFilter) ? value.previewFilter : fallback.previewFilter,
       previewSortMode: isPreviewSortMode(value.previewSortMode) ? value.previewSortMode : fallback.previewSortMode,
+      cacheEntryScope,
+      defaultWorldbookSelection: isDefaultWorldbookSelection(value.defaultWorldbookSelection)
+        ? value.defaultWorldbookSelection
+        : fallback.defaultWorldbookSelection,
     };
   } catch (error) {
     console.warn(`[世界书缓存优化器] 读取过滤器偏好失败：${formatError(error)}`);
@@ -4412,6 +4641,8 @@ function persistOptimizerFilterPreference(): void {
         bookSourceFilter: bookSourceFilter.value,
         previewFilter: previewFilter.value,
         previewSortMode: previewSortMode.value,
+        cacheEntryScope: cacheEntryScope.value,
+        defaultWorldbookSelection: defaultWorldbookSelection.value,
       } satisfies OptimizerFilterPreference),
     );
   } catch (error) {
@@ -4439,6 +4670,14 @@ function safeCall<T>(callback: () => T, fallback: T): T {
 
 function isOptimizerMode(value: unknown): value is OptimizerMode {
   return value === 'cache' || value === 'prompt_build_speed';
+}
+
+function isCacheEntryScope(value: unknown): value is CacheEntryScope {
+  return value === 'enabled' || value === 'all';
+}
+
+function isDefaultWorldbookSelection(value: unknown): value is DefaultWorldbookSelection {
+  return value === 'active' || value === 'global' || value === 'character' || value === 'chat';
 }
 
 function isBookSourceFilter(value: unknown): value is BookSourceFilter {
@@ -4880,18 +5119,32 @@ function collectHighlightRanges(row: PreviewChange): Array<{ start: number; end:
   return ranges;
 }
 
-function buildBookPlan(bookName: string, entries: WorldbookEntry[], includeFiltered: boolean): BookPlan {
+function buildBookPlan(
+  bookName: string,
+  entries: WorldbookEntry[],
+  includeFiltered: boolean,
+  options: BuildBookPlanOptions = {},
+): BookPlan {
   const originalRanks = new Map(entries.map((entry, index) => [entry.uid, getPromptOrderRank(entry, index)]));
   const plans = entries.map((entry, index) =>
     applyContentEditOverride(
-      applyCustomEntryOverride(buildEntryPlan(bookName, entry, index, originalRanks.get(entry.uid) ?? index)),
+      applyCustomEntryOverride(
+        buildCacheOptimizationEntryPlan(
+          bookName,
+          entry,
+          index,
+          originalRanks.get(entry.uid) ?? index,
+          options.includeDisabledEntries === true,
+        ),
+      ),
     ),
   );
   applyD0DynamicBoundary(plans, originalRanks);
   rebalanceTargetOrders(plans, originalRanks);
   assertTargetBucketOrderStable(bookName, plans, originalRanks);
+  const finalPlans = options.includeDisabledEntries === true ? plans.map(restoreOriginalDisabledState) : plans;
 
-  const rows = plans.flatMap(plan => {
+  const rows = finalPlans.flatMap(plan => {
     const changed = !sameManagedEntry(plan.original, plan.next);
     if (!includeFiltered && !changed) return [];
     return [createPreviewRow(bookName, plan, changed ? 'changed' : 'unchanged', changed)];
@@ -4899,8 +5152,34 @@ function buildBookPlan(bookName: string, entries: WorldbookEntry[], includeFilte
 
   return {
     rows,
-    entries: plans.map(plan => plan.next),
-    changedCount: plans.filter(plan => !sameManagedEntry(plan.original, plan.next)).length,
+    entries: finalPlans.map(plan => plan.next),
+    changedCount: finalPlans.filter(plan => !sameManagedEntry(plan.original, plan.next)).length,
+  };
+}
+
+function buildCacheOptimizationEntryPlan(
+  bookName: string,
+  entry: WorldbookEntry,
+  originalIndex: number,
+  promptRank: number,
+  includeDisabledEntries: boolean,
+): EntryPlan {
+  if (!includeDisabledEntries || entry.enabled) return buildEntryPlan(bookName, entry, originalIndex, promptRank);
+  const simulatedEntry = { ...entry, enabled: true };
+  return {
+    ...buildEntryPlan(bookName, simulatedEntry, originalIndex, promptRank),
+    original: entry,
+  };
+}
+
+function restoreOriginalDisabledState(plan: EntryPlan): EntryPlan {
+  if (plan.original.enabled) return plan;
+  const next = { ...plan.next, enabled: false };
+  return {
+    ...plan,
+    next,
+    cacheZoneText: '禁用',
+    strategyText: formatStrategyChange(plan.original, next),
   };
 }
 
@@ -8108,6 +8387,81 @@ select:disabled {
   cursor: default;
 }
 
+.wbm-optimizer-settings-box {
+  width: min(620px, 100%);
+  display: grid;
+  gap: 12px;
+}
+
+.wbm-optimizer-settings-group {
+  display: grid;
+  gap: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: var(--wbm-radius-md);
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.wbm-optimizer-settings-group h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.wbm-settings-choice-list {
+  display: grid;
+  gap: 8px;
+}
+
+.wbm-settings-choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: flex-start;
+  gap: 8px;
+  min-height: 48px;
+  padding: 9px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: var(--wbm-radius-md);
+  background: var(--wbm-surface-raised);
+  color: var(--wbm-text);
+  cursor: pointer;
+}
+
+.wbm-settings-choice.active {
+  border-color: rgba(77, 107, 254, 0.72);
+  background: var(--wbm-blue-soft);
+}
+
+.wbm-settings-choice input {
+  margin-top: 3px;
+}
+
+.wbm-settings-choice span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.wbm-settings-choice strong,
+.wbm-settings-choice small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wbm-settings-choice strong {
+  line-height: 1.2;
+}
+
+.wbm-settings-choice small {
+  color: var(--wbm-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.wbm-optimizer-settings-box .wbm-dialog-actions {
+  justify-content: space-between;
+}
+
 .wbm-token-warning-box {
   border-color: rgba(239, 68, 68, 0.78);
   box-shadow: 0 24px 80px rgba(127, 29, 29, 0.28);
@@ -9128,13 +9482,15 @@ select:disabled {
     padding: 10px;
   }
 
-  .wbm-rule-help-modal {
+  .wbm-rule-help-modal,
+  .wbm-optimizer-settings-modal {
     align-items: stretch;
     justify-content: center;
     padding: 0;
   }
 
-  .wbm-rule-help-modal .wbm-rule-help-box {
+  .wbm-rule-help-modal .wbm-rule-help-box,
+  .wbm-optimizer-settings-modal .wbm-optimizer-settings-box {
     width: 100%;
     height: 100%;
     max-height: none;
