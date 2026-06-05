@@ -1766,7 +1766,6 @@ type DedupeConfirmState = {
   open: boolean;
   groupCount: number;
   deleteCount: number;
-  rebindCount: number;
   characterRebindCount: number;
 };
 
@@ -2339,7 +2338,6 @@ const dedupeConfirmState = reactive<DedupeConfirmState>({
   open: false,
   groupCount: 0,
   deleteCount: 0,
-  rebindCount: 0,
   characterRebindCount: 0,
 });
 let dedupeScanController: AbortController | null = null;
@@ -2825,12 +2823,6 @@ const dedupeSelectedDeleteCount = computed(() =>
   dedupeSelectedGroups.value.reduce((sum, group) => sum + dedupeDeleteCandidates(group).length, 0),
 );
 
-const dedupeSelectedRebindCount = computed(() =>
-  dedupeSelectedGroups.value.reduce(
-    (sum, group) => sum + dedupeDeleteCandidates(group).filter(candidate => candidate.sources.length > 0).length,
-    0,
-  ),
-);
 const dedupeSelectedCharacterRebindCount = computed(() =>
   dedupeSelectedGroups.value.reduce((sum, group) => sum + dedupeGroupCharacterRebindCount(group), 0),
 );
@@ -4385,7 +4377,6 @@ function confirmDedupeApply(): void {
   if (!canApplyDedupe.value) return;
   dedupeConfirmState.groupCount = dedupeSelectedGroups.value.length;
   dedupeConfirmState.deleteCount = dedupeSelectedDeleteCount.value;
-  dedupeConfirmState.rebindCount = dedupeSelectedRebindCount.value;
   dedupeConfirmState.characterRebindCount = dedupeSelectedCharacterRebindCount.value;
   closeTransientModals();
   dedupeConfirmState.open = true;
@@ -4469,10 +4460,7 @@ async function applyDedupeChanges(): Promise<void> {
 }
 
 async function rebindWorldbookReferences(deleteNames: string[], keepName: string): Promise<DuplicateWorldbookSource[]> {
-  const allCharacterWorldbooks =
-    characterWorldbookBindings.value.length > 0
-      ? characterWorldbookBindings.value
-      : await collectAllCharacterWorldbookBindings();
+  const allCharacterWorldbooks = await collectAllCharacterWorldbookBindings();
   const bindings = {
     globalNames: typeof getGlobalWorldbookNames === 'function' ? getGlobalWorldbookNames() : undefined,
     charWorldbooks: typeof getCharWorldbookNames === 'function' ? getCharWorldbookNames('current') : undefined,
@@ -4497,7 +4485,7 @@ async function rebindWorldbookReferences(deleteNames: string[], keepName: string
   }
 
   if (plan.characterUpdates && plan.characterUpdates.length > 0) {
-    if (typeof updateCharacterWith !== 'function') throw new Error('角色卡主世界书重绑 API 不可用');
+    if (typeof updateCharacterWith !== 'function') throw new Error('角色卡世界书重绑 API 不可用');
     const deleted = new Set(deleteNames);
     const skippedCharacters: string[] = [];
     const context = getSillyTavernContext();
@@ -4537,7 +4525,7 @@ async function rebindWorldbookReferences(deleteNames: string[], keepName: string
     }
     if (skippedCharacters.length > 0) {
       console.warn(
-        `[世界书智能去重] ${skippedCharacters.length} 张角色卡在应用时无法重新定位，已跳过主世界书重绑：${skippedCharacters
+        `[世界书智能去重] ${skippedCharacters.length} 张角色卡在应用时无法重新定位，已跳过世界书重绑：${skippedCharacters
           .slice(0, 5)
           .join('、')}`,
       );
