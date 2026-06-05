@@ -351,7 +351,7 @@
               </div>
               <div v-if="dedupeGroupCharacterRebindCount(group) > 0" class="wbm-dedupe-warning-line">
                 <i class="fa-solid fa-link"></i>
-                将更新 {{ dedupeGroupCharacterRebindCount(group) }} 张角色卡的主世界书绑定
+                将更新 {{ dedupeGroupCharacterRebindCount(group) }} 张角色卡的世界书绑定
               </div>
 
               <div class="wbm-dedupe-candidates">
@@ -1395,10 +1395,10 @@
         <div class="wbm-confirm-box" role="dialog" aria-modal="true" aria-label="确认应用世界书去重">
           <h3>确认应用去重</h3>
           <p>
-            将处理 {{ dedupeConfirmState.groupCount }} 组候选，删除
+            将处理 {{ dedupeConfirmState.groupCount }} 组重复候选，删除
             {{ dedupeConfirmState.deleteCount }} 本旧版本世界书。
-            其中 {{ dedupeConfirmState.rebindCount }} 本检测到当前绑定，会先重绑到保留版本再删除。
-            还会更新 {{ dedupeConfirmState.characterRebindCount }} 张角色卡的主世界书绑定。
+            删除前，会先把正在使用这些旧世界书的地方改成保留版本。
+            本次预计会更新 {{ dedupeConfirmState.characterRebindCount }} 张角色卡的世界书绑定。
           </p>
           <div class="wbm-dialog-actions">
             <button class="wbm-small-btn" type="button" @click="cancelDedupeConfirm">取消</button>
