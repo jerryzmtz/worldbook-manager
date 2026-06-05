@@ -2058,34 +2058,31 @@ const DEDUPE_STRATEGY_OPTIONS: Array<{
   {
     value: 'conservative',
     label: '保守',
-    description: '少报一点，尽量避免误判。',
+    description: '误报少，漏报会多。',
     icon: 'fa-shield-halved',
     ruleDetails: [
-      { title: '查重范围', description: '只看名字像同一本书的新旧版本。' },
-      { title: '查重算法', description: '内容要几乎一样，触发方式也要接近。' },
-      { title: '使用建议', description: '怕误删就选它。结果会少一点，但更稳。' },
+      { title: '比较对象', description: '只比较名字相近的世界书。' },
+      { title: '查重算法', description: '几乎整本一样才算重复。' },
     ],
   },
   {
     value: 'balanced',
     label: '平衡',
-    description: '默认推荐，适合清理角色卡更新带来的新旧世界书。',
+    description: '默认推荐',
     icon: 'fa-scale-balanced',
     ruleDetails: [
-      { title: '查重范围', description: '名字不同也会比，适合角色卡更新后的新旧世界书。' },
-      { title: '查重算法', description: '主要看条目正文有没有大量重合。' },
-      { title: '使用建议', description: '默认选它。能抓常见重复，也不会太冒进。' },
+      { title: '比较对象', description: '比较所有选中的世界书' },
+      { title: '查重算法', description: '比较条目正文内容有没有大段重复。' },
     ],
   },
   {
     value: 'aggressive',
     label: '激进',
-    description: '多报一点，适合大范围清理。',
+    description: '最激进的清理策略',
     icon: 'fa-bolt',
     ruleDetails: [
-      { title: '查重范围', description: '会比较更多世界书，尽量把可疑重复找出来。' },
-      { title: '查重算法', description: '内容有一定重合就可能列出，误判会更多。' },
-      { title: '使用建议', description: '大扫除时用。应用前仔细看预览。' },
+      { title: '比较对象', description: '比较所有选中的世界书' },
+      { title: '查重算法', description: '条目正文只要有一部分重合就可会被检出。' },
     ],
   },
 ];
