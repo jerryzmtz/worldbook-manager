@@ -9,9 +9,11 @@ import {
 
 const OPEN_MANAGER_BUTTON = '世界书缓存优化器';
 const OPEN_CACHE_INSPECTOR_BUTTON = '缓存命中对比';
+const OPEN_DEDUPE_BUTTON = '世界书版本去重';
 const LEGACY_OPEN_MANAGER_BUTTONS = ['世界书管理', '打开世界书批量管理器'];
 const OPEN_MANAGER_EVENT = 'worldbook-manager:open';
 const OPEN_CACHE_INSPECTOR_EVENT = 'worldbook-manager:open-cache-inspector';
+const OPEN_DEDUPE_EVENT = 'worldbook-manager:open-dedupe';
 const DEFAULT_VISIBLE_MIGRATION_KEY = 'worldbookManagerButtonDefaultVisibleMigrated';
 const IOS_CACHE_MONITOR_DISABLE_STORAGE_KEY = 'worldbookCacheInspectorDisableMonitorOnIOS';
 const IOS_CACHE_TAURI_FALLBACK_STORAGE_KEY = 'worldbookCacheInspectorTauriFallbackOnIOS';
@@ -30,6 +32,7 @@ let styleHandle: { destroy: () => void } | null = null;
 let $appRoot: JQuery<HTMLDivElement> | null = null;
 let buttonEventHandle: EventOnReturn | null = null;
 let cacheButtonEventHandle: EventOnReturn | null = null;
+let dedupeButtonEventHandle: EventOnReturn | null = null;
 let cacheMonitorHandle: CacheInspectorMonitorHandle | null = null;
 
 function scriptButton(name: string, button: Partial<ScriptButton> = {}, forceVisible = false): ScriptButton {
@@ -72,6 +75,10 @@ $(() => {
   cacheButtonEventHandle = eventOn(getButtonEvent(OPEN_CACHE_INSPECTOR_BUTTON), () => {
     console.info('[缓存命中对比] 收到脚本按钮事件');
     window.dispatchEvent(new CustomEvent(OPEN_CACHE_INSPECTOR_EVENT));
+  });
+  dedupeButtonEventHandle = eventOn(getButtonEvent(OPEN_DEDUPE_BUTTON), () => {
+    console.info('[世界书版本去重] 收到脚本按钮事件');
+    window.dispatchEvent(new CustomEvent(OPEN_DEDUPE_EVENT));
   });
   (window as WorldbookManagerWindow)[RUNTIME_GLOBAL_KEY] = { destroy: destroyRuntime };
   cacheMonitorHandle = safeInstallCacheInspectorMonitor();
@@ -168,8 +175,10 @@ function syncManagerButton(): void {
   updateScriptButtonsWith(buttons => {
     const existingManagerButton = buttons.find(button => button.name === OPEN_MANAGER_BUTTON);
     const existingCacheButton = buttons.find(button => button.name === OPEN_CACHE_INSPECTOR_BUTTON);
+    const existingDedupeButton = buttons.find(button => button.name === OPEN_DEDUPE_BUTTON);
     let insertedManagerButton = false;
     let insertedCacheButton = false;
+    let insertedDedupeButton = false;
     const nextButtons: ScriptButton[] = [];
 
     for (const button of buttons) {
@@ -197,6 +206,14 @@ function syncManagerButton(): void {
         continue;
       }
 
+      if (button.name === OPEN_DEDUPE_BUTTON) {
+        if (!insertedDedupeButton) {
+          nextButtons.push(scriptButton(OPEN_DEDUPE_BUTTON, button, forceVisibleOnce));
+          insertedDedupeButton = true;
+        }
+        continue;
+      }
+
       nextButtons.push(button);
     }
 
@@ -208,6 +225,10 @@ function syncManagerButton(): void {
       nextButtons.push(scriptButton(OPEN_CACHE_INSPECTOR_BUTTON, existingCacheButton, true));
     }
 
+    if (!insertedDedupeButton) {
+      nextButtons.push(scriptButton(OPEN_DEDUPE_BUTTON, existingDedupeButton, true));
+    }
+
     return nextButtons;
   });
 }
@@ -215,12 +236,14 @@ function syncManagerButton(): void {
 function destroyRuntime(): void {
   buttonEventHandle?.stop();
   cacheButtonEventHandle?.stop();
+  dedupeButtonEventHandle?.stop();
   cacheMonitorHandle?.destroy();
   app.unmount();
   styleHandle?.destroy();
   $appRoot?.remove();
   buttonEventHandle = null;
   cacheButtonEventHandle = null;
+  dedupeButtonEventHandle = null;
   cacheMonitorHandle = null;
   styleHandle = null;
   $appRoot = null;
