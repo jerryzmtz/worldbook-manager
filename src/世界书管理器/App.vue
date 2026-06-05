@@ -12,21 +12,21 @@
           <div class="wbm-title-line">
             <h2>{{ activePanelTitle }}</h2>
             <span class="wbm-version">{{ APP_VERSION }}</span>
-            <button
-              class="wbm-version-manager-btn"
-              :class="{ checking: versionCheckRunning, available: versionUpdateAvailable }"
-              type="button"
-              :title="versionManagerButtonTitle"
-              :aria-label="versionManagerButtonTitle"
-              data-wbm-tutorial="version-manager"
-              @click="openVersionManager"
-            >
-              <i class="fa-solid" :class="versionManagerButtonIcon"></i>
-              <span v-if="versionUpdateAvailable" class="wbm-update-dot" aria-hidden="true"></span>
-            </button>
           </div>
         </div>
         <div class="wbm-header-actions">
+          <button
+            class="wbm-icon-btn wbm-version-manager-btn"
+            :class="{ checking: versionCheckRunning, available: versionUpdateAvailable }"
+            type="button"
+            :title="versionManagerButtonTitle"
+            :aria-label="versionManagerButtonTitle"
+            data-wbm-tutorial="version-manager"
+            @click="openVersionManager"
+          >
+            <i class="fa-solid" :class="versionManagerButtonIcon"></i>
+            <span v-if="versionUpdateAvailable" class="wbm-update-dot" aria-hidden="true"></span>
+          </button>
           <button
             v-if="activePanel === 'optimizer'"
             class="wbm-icon-btn"
@@ -76,8 +76,8 @@
       <section v-if="activePanel === 'dedupe'" class="wbm-work-section wbm-dedupe-section">
         <div class="wbm-section-toolbar">
           <div>
-            <h3>扫描范围</h3>
-            <span>默认扫描全部世界书，可用搜索和来源过滤缩小范围</span>
+            <h3>去重配置</h3>
+            <span>规则策略 · 世界书选择 · 应用确认</span>
           </div>
           <button class="wbm-small-btn" type="button" :disabled="isBusy || !dedupeApiReady" @click="loadWorldbooksForDedupe">
             <i class="fa-solid fa-rotate"></i>
@@ -142,8 +142,8 @@
             </div>
 
             <div class="wbm-row-actions">
-              <button class="wbm-small-btn" type="button" :disabled="isBusy || !dedupeApiReady" @click="selectAllBooks">
-                全部
+              <button class="wbm-small-btn" type="button" :disabled="isBusy || !dedupeApiReady" @click="selectActiveBooks">
+                自动选择
               </button>
               <button
                 class="wbm-small-btn"
@@ -151,10 +151,7 @@
                 :disabled="isBusy || filteredWorldbookNames.length === 0"
                 @click="selectFilteredBooks"
               >
-                全选过滤
-              </button>
-              <button class="wbm-small-btn" type="button" :disabled="isBusy || !dedupeApiReady" @click="selectActiveBooks">
-                当前启用
+                全选
               </button>
               <button
                 class="wbm-small-btn"
@@ -197,23 +194,34 @@
             </div>
           </section>
 
-          <section class="wbm-panel wbm-dedupe-rule-panel">
+          <section class="wbm-panel wbm-rules-panel wbm-dedupe-rule-panel">
             <div class="wbm-panel-title">
-              <h3>规则</h3>
-              <span class="wbm-inline-stat">最新版本优先</span>
+              <h3>规则区</h3>
+              <span class="wbm-inline-stat">{{ currentDedupeStrategyOption.label }} · 最新版本优先</span>
             </div>
-            <div class="wbm-dedupe-rules">
-              <div>
-                <strong>名称归组</strong>
-                <span>识别 v1、v2、0521、2026-05-21、副本和 copy</span>
-              </div>
-              <div>
-                <strong>内容校验</strong>
-                <span>比较启用条目指纹、整书指纹和覆盖率</span>
-              </div>
-              <div>
-                <strong>保守应用</strong>
-                <span>低置信度默认跳过，绑定会先重指向保留版本</span>
+            <div class="wbm-preset wbm-dedupe-preset">
+              <div class="wbm-mode-switch wbm-dedupe-strategy-switch" aria-label="世界书去重策略">
+                <button
+                  v-for="option in DEDUPE_STRATEGY_OPTIONS"
+                  :key="option.value"
+                  class="wbm-mode-option"
+                  :class="{ active: dedupeStrategy === option.value }"
+                  type="button"
+                  :aria-pressed="dedupeStrategy === option.value"
+                  :disabled="isBusy"
+                  @click="setDedupeStrategy(option.value)"
+                  >
+                    <i class="fa-solid" :class="option.icon"></i>
+                    <span>
+                      <strong>{{ option.label }}</strong>
+                    </span>
+                  </button>
+                </div>
+              <div class="wbm-dedupe-rules">
+                <div v-for="rule in currentDedupeRuleDetails" :key="rule.title">
+                  <strong>{{ rule.title }}</strong>
+                  <span>{{ rule.description }}</span>
+                </div>
               </div>
             </div>
           </section>
@@ -311,6 +319,10 @@
               <div v-if="group.warnings.length > 0" class="wbm-dedupe-warning-line">
                 <i class="fa-solid fa-triangle-exclamation"></i>
                 {{ group.warnings.join('；') }}
+              </div>
+              <div v-if="dedupeGroupCharacterRebindCount(group) > 0" class="wbm-dedupe-warning-line">
+                <i class="fa-solid fa-link"></i>
+                将更新 {{ dedupeGroupCharacterRebindCount(group) }} 张角色卡的主世界书绑定
               </div>
 
               <div class="wbm-dedupe-candidates">
@@ -1068,7 +1080,7 @@
             </button>
           </header>
 
-          <section class="wbm-optimizer-settings-group">
+          <section v-if="activePanel === 'optimizer'" class="wbm-optimizer-settings-group">
             <h4>优化缓存条目范围</h4>
             <div class="wbm-settings-choice-list" role="radiogroup" aria-label="优化缓存条目范围">
               <label
@@ -1092,7 +1104,7 @@
             </div>
           </section>
 
-          <section class="wbm-optimizer-settings-group">
+          <section v-if="activePanel === 'optimizer'" class="wbm-optimizer-settings-group">
             <h4>默认选择世界书</h4>
             <div class="wbm-settings-choice-list" role="radiogroup" aria-label="默认选择世界书">
               <label
@@ -1117,7 +1129,12 @@
           </section>
 
           <div class="wbm-dialog-actions">
-            <button class="wbm-small-btn" type="button" :disabled="isBusy || !apiReady" @click="selectDefaultOptimizerBooks">
+            <button
+              class="wbm-small-btn"
+              type="button"
+              :disabled="isBusy || !apiReady"
+              @click="selectDefaultOptimizerBooks"
+            >
               按设置自动选择
             </button>
             <button class="wbm-primary-btn" type="button" @click="closeOptimizerSettings">完成</button>
@@ -1352,6 +1369,7 @@
             将处理 {{ dedupeConfirmState.groupCount }} 组候选，删除
             {{ dedupeConfirmState.deleteCount }} 本旧版本世界书。
             其中 {{ dedupeConfirmState.rebindCount }} 本检测到当前绑定，会先重绑到保留版本再删除。
+            还会更新 {{ dedupeConfirmState.characterRebindCount }} 张角色卡的主世界书绑定。
           </p>
           <div class="wbm-dialog-actions">
             <button class="wbm-small-btn" type="button" @click="cancelDedupeConfirm">取消</button>
@@ -1543,9 +1561,11 @@ import {
   createDuplicateWorldbookRebindPlan,
   type DuplicateApplyResult,
   type DuplicateWorldbookCandidate,
+  type DuplicateWorldbookCharacterBinding,
   type DuplicateWorldbookGroup,
   type DuplicateWorldbookSnapshot,
   type DuplicateWorldbookSource,
+  type DuplicateWorldbookStrategy,
 } from './duplicate-worldbook';
 import { createCacheInspectorTutorial, createWorldbookTutorial } from './tutorial';
 import {
@@ -1566,7 +1586,7 @@ import {
   type VersionRelation,
 } from './version-manager';
 
-const APP_VERSION = 'v3.26';
+const APP_VERSION = 'v4.00';
 const EMPTY_VERSION_CATALOG: VersionCatalog = {
   latestVersion: null,
   versions: [],
@@ -1715,6 +1735,7 @@ type DedupeConfirmState = {
   groupCount: number;
   deleteCount: number;
   rebindCount: number;
+  characterRebindCount: number;
 };
 
 type LoadWorldbooksOptions = {
@@ -1740,6 +1761,7 @@ type OptimizerFilterPreference = {
   previewSortMode: PreviewSortMode;
   cacheEntryScope: CacheEntryScope;
   defaultWorldbookSelection: DefaultWorldbookSelection;
+  dedupeStrategy: DuplicateWorldbookStrategy;
 };
 
 type CustomStrategyType = Extract<WorldbookEntry['strategy']['type'], 'constant' | 'selective'>;
@@ -2026,6 +2048,47 @@ const DEFAULT_WORLD_BOOK_SELECTION_OPTIONS: Array<{
     description: '默认选择当前聊天绑定的世界书。',
   },
 ];
+const DEDUPE_STRATEGY_OPTIONS: Array<{
+  value: DuplicateWorldbookStrategy;
+  label: string;
+  description: string;
+  icon: string;
+  ruleDetails: Array<{ title: string; description: string }>;
+}> = [
+  {
+    value: 'conservative',
+    label: '保守',
+    description: '少报一点，尽量避免误判。',
+    icon: 'fa-shield-halved',
+    ruleDetails: [
+      { title: '查重范围', description: '只看名字像同一本书的新旧版本。' },
+      { title: '查重算法', description: '内容要几乎一样，触发方式也要接近。' },
+      { title: '使用建议', description: '怕误删就选它。结果会少一点，但更稳。' },
+    ],
+  },
+  {
+    value: 'balanced',
+    label: '平衡',
+    description: '默认推荐，适合清理角色卡更新带来的新旧世界书。',
+    icon: 'fa-scale-balanced',
+    ruleDetails: [
+      { title: '查重范围', description: '名字不同也会比，适合角色卡更新后的新旧世界书。' },
+      { title: '查重算法', description: '主要看条目正文有没有大量重合。' },
+      { title: '使用建议', description: '默认选它。能抓常见重复，也不会太冒进。' },
+    ],
+  },
+  {
+    value: 'aggressive',
+    label: '激进',
+    description: '多报一点，适合大范围清理。',
+    icon: 'fa-bolt',
+    ruleDetails: [
+      { title: '查重范围', description: '会比较更多世界书，尽量把可疑重复找出来。' },
+      { title: '查重算法', description: '内容有一定重合就可能列出，误判会更多。' },
+      { title: '使用建议', description: '大扫除时用。应用前仔细看预览。' },
+    ],
+  },
+];
 const DEFAULT_WORLDBOOK_IMPLICIT_FIELDS: WorldbookImplicitFields = {
   addMemo: true,
   matchPersonaDescription: false,
@@ -2207,9 +2270,11 @@ const cacheEntryScope = ref<CacheEntryScope>(optimizerFilterPreference.cacheEntr
 const defaultWorldbookSelection = ref<DefaultWorldbookSelection>(
   optimizerFilterPreference.defaultWorldbookSelection,
 );
+const dedupeStrategy = ref<DuplicateWorldbookStrategy>(optimizerFilterPreference.dedupeStrategy);
 const worldbookNames = ref<string[]>([]);
 const selectedBooks = ref<Set<string>>(new Set());
 const bookSources = ref<Record<string, BookSource[]>>({});
+const characterWorldbookBindings = ref<DuplicateWorldbookCharacterBinding[]>([]);
 const bookMetadata = ref<Record<string, BookMetadata>>({});
 const metadataProgress = reactive<MetadataProgress>({ loaded: 0, total: 0, running: false });
 const bookListElement = ref<HTMLElement | null>(null);
@@ -2219,7 +2284,13 @@ const dedupeGroups = ref<DuplicateWorldbookGroup[]>([]);
 const dedupeSelectedGroupIds = ref<Set<string>>(new Set());
 const dedupeKeepOverrides = ref<Record<string, string>>({});
 const dedupeApplyResults = ref<DuplicateApplyResult[]>([]);
-const dedupeConfirmState = reactive<DedupeConfirmState>({ open: false, groupCount: 0, deleteCount: 0, rebindCount: 0 });
+const dedupeConfirmState = reactive<DedupeConfirmState>({
+  open: false,
+  groupCount: 0,
+  deleteCount: 0,
+  rebindCount: 0,
+  characterRebindCount: 0,
+});
 const previewFilter = ref<PreviewFilter>(optimizerFilterPreference.previewFilter);
 const previewSortMode = ref<PreviewSortMode>(optimizerFilterPreference.previewSortMode);
 const expandedPreviewIds = ref<Set<string>>(new Set());
@@ -2278,7 +2349,7 @@ const dedupeApiReady = computed(() => {
 
 const activePanelTitle = computed(() => {
   if (activePanel.value === 'cacheInspector') return '缓存命中对比';
-  if (activePanel.value === 'dedupe') return '世界书版本去重';
+  if (activePanel.value === 'dedupe') return '世界书智能去重';
   return '世界书缓存优化器';
 });
 
@@ -2610,6 +2681,10 @@ const canPreview = computed(() => apiReady.value && !validationMessage.value);
 const currentModeOption = computed(
   () => OPTIMIZER_MODE_OPTIONS.find(option => option.value === optimizerMode.value) ?? OPTIMIZER_MODE_OPTIONS[0],
 );
+const currentDedupeStrategyOption = computed(
+  () => DEDUPE_STRATEGY_OPTIONS.find(option => option.value === dedupeStrategy.value) ?? DEDUPE_STRATEGY_OPTIONS[1],
+);
+const currentDedupeRuleDetails = computed(() => currentDedupeStrategyOption.value.ruleDetails);
 
 const isPromptBuildSpeedMode = computed(() => optimizerMode.value === 'prompt_build_speed');
 
@@ -2674,6 +2749,9 @@ const dedupeSelectedRebindCount = computed(() =>
     0,
   ),
 );
+const dedupeSelectedCharacterRebindCount = computed(() =>
+  dedupeSelectedGroups.value.reduce((sum, group) => sum + dedupeGroupCharacterRebindCount(group), 0),
+);
 
 const canApplyDedupe = computed(() => dedupeApiReady.value && dedupeSelectedDeleteCount.value > 0);
 
@@ -2689,7 +2767,7 @@ const dedupeSelectionLabel = computed(() => {
 });
 
 const dedupeEmptyText = computed(() =>
-  selectedBooks.value.size < 2 ? '至少选择两本世界书后再生成方案。' : '还没有发现可处理的版本重复组。',
+  selectedBooks.value.size < 2 ? '至少选择两本世界书后再生成方案。' : '还没有发现可处理的重复候选。',
 );
 
 const visiblePreviewRows = computed(() => {
@@ -3019,7 +3097,7 @@ function openCacheInspector(): void {
 }
 
 function openDedupe(): void {
-  console.info('[世界书版本去重] 打开版本去重');
+  console.info('[世界书智能去重] 打开智能去重');
   activePanel.value = 'dedupe';
   isOpen.value = true;
   syncVisualViewportHeight();
@@ -3049,7 +3127,7 @@ function closeManager(): void {
 }
 
 watch(
-  [optimizerMode, bookSourceFilter, previewFilter, previewSortMode, cacheEntryScope, defaultWorldbookSelection],
+  [optimizerMode, bookSourceFilter, previewFilter, previewSortMode, cacheEntryScope, defaultWorldbookSelection, dedupeStrategy],
   persistOptimizerFilterPreference,
 );
 
@@ -3059,6 +3137,10 @@ watch(cacheEntryScope, () => {
   structureState.open = false;
   structureHighlightSource.value = null;
   resetPreviewManualState();
+});
+
+watch(dedupeStrategy, () => {
+  resetDedupeState();
 });
 
 function openOptimizerSettings(): void {
@@ -3382,11 +3464,6 @@ function selectFilteredBooks(): void {
   resetDedupeState();
 }
 
-function selectAllBooks(): void {
-  selectedBooks.value = new Set(worldbookNames.value);
-  resetDedupeState();
-}
-
 function handleBookSortClick(): void {
   if (bookSortMode.value === 'selected') {
     refreshSelectedBookSortRank();
@@ -3535,6 +3612,37 @@ function collectActiveBookSources(availableNames: string[]): Record<string, Book
 
 function refreshBookSources(): void {
   bookSources.value = collectActiveBookSources(worldbookNames.value);
+}
+
+async function collectAllCharacterWorldbookBindings(): Promise<DuplicateWorldbookCharacterBinding[]> {
+  if (typeof getCharacterNames !== 'function' || typeof getCharacter !== 'function') return [];
+  const bindings: DuplicateWorldbookCharacterBinding[] = [];
+  const failures: string[] = [];
+  let names: string[] = [];
+
+  try {
+    names = getCharacterNames();
+  } catch (error) {
+    notifyError(`读取角色卡列表失败：${formatError(error)}`);
+    return bindings;
+  }
+
+  for (const characterName of names) {
+    try {
+      const character = await getCharacter(characterName);
+      bindings.push({
+        characterName,
+        worldbook: typeof character.worldbook === 'string' ? character.worldbook : null,
+      });
+    } catch (error) {
+      failures.push(`${characterName}: ${formatError(error)}`);
+    }
+  }
+
+  if (failures.length > 0) {
+    notifyError(`部分角色卡绑定读取失败：${failures.slice(0, 3).join('；')}`);
+  }
+  return bindings;
 }
 
 function resolveAvailableWorldbookName(name: string | null | undefined, available: Map<string, string>): string | null {
@@ -3863,7 +3971,9 @@ function resetDedupeState(): void {
   dedupeSelectedGroupIds.value = new Set();
   dedupeKeepOverrides.value = {};
   dedupeApplyResults.value = [];
+  characterWorldbookBindings.value = [];
   dedupeConfirmState.open = false;
+  dedupeConfirmState.characterRebindCount = 0;
 }
 
 async function generateDefaultPreview(): Promise<void> {
@@ -3898,8 +4008,10 @@ async function generateDedupePreview(): Promise<void> {
       }
     }
 
+    characterWorldbookBindings.value = await collectAllCharacterWorldbookBindings();
     const plan = createDuplicateWorldbookPlan(snapshots, toDedupeSourceMap(bookSources.value), {
       keepPriority: 'latest_version',
+      strategy: dedupeStrategy.value,
     });
     dedupeGroups.value = plan.groups;
     dedupeSelectedGroupIds.value = new Set(plan.groups.filter(group => group.defaultSelected).map(group => group.id));
@@ -3908,7 +4020,7 @@ async function generateDedupePreview(): Promise<void> {
       notifyError(`部分世界书读取失败：${failures.slice(0, 3).join('；')}`);
     }
     if (plan.groups.length === 0) {
-      notifyInfo('没有发现可处理的整本版本重复组。');
+      notifyInfo('没有发现可处理的世界书重复候选。');
     }
   } finally {
     isBusy.value = false;
@@ -3975,6 +4087,12 @@ function dedupeDeleteSummary(group: DuplicateWorldbookGroup): string {
   return `将删除 ${deleteCount} 本旧版本`;
 }
 
+function dedupeGroupCharacterRebindCount(group: DuplicateWorldbookGroup): number {
+  const deleted = new Set(dedupeDeleteCandidates(group).map(candidate => candidate.name));
+  if (deleted.size === 0) return 0;
+  return characterWorldbookBindings.value.filter(binding => binding.worldbook && deleted.has(binding.worldbook)).length;
+}
+
 function dedupeConfidenceLabel(confidence: DuplicateWorldbookGroup['confidence']): string {
   const labels: Record<DuplicateWorldbookGroup['confidence'], string> = {
     exact: '完全重复',
@@ -4002,7 +4120,9 @@ function dedupeCandidateSimilarityLabel(
   candidate: DuplicateWorldbookCandidate,
 ): string {
   if (candidate.name === dedupeKeepName(group)) return '保留版本';
-  return `与保留版本相似 ${formatPercent(candidate.similarityToKeep)} · 覆盖 ${formatPercent(candidate.coverageByKeep)}`;
+  return `内容覆盖 ${formatPercent(candidate.contentCoverageByKeep)} · 整书相似 ${formatPercent(
+    candidate.textSimilarityToKeep,
+  )} · 匹配 ${candidate.matchedEntryCountToKeep} 条`;
 }
 
 function dedupeSourcesLabel(sources: DuplicateWorldbookSource[]): string {
@@ -4014,6 +4134,7 @@ function dedupeSourceLabel(source: DuplicateWorldbookSource): string {
     chat: '聊天',
     character_primary: '角色',
     character_additional: '附加',
+    character_all: '角色卡',
     global: '全局',
   };
   return labels[source];
@@ -4028,6 +4149,7 @@ function confirmDedupeApply(): void {
   dedupeConfirmState.groupCount = dedupeSelectedGroups.value.length;
   dedupeConfirmState.deleteCount = dedupeSelectedDeleteCount.value;
   dedupeConfirmState.rebindCount = dedupeSelectedRebindCount.value;
+  dedupeConfirmState.characterRebindCount = dedupeSelectedCharacterRebindCount.value;
   closeTransientModals();
   dedupeConfirmState.open = true;
   scheduleModalViewportSync();
@@ -4110,10 +4232,15 @@ async function applyDedupeChanges(): Promise<void> {
 }
 
 async function rebindWorldbookReferences(deleteNames: string[], keepName: string): Promise<DuplicateWorldbookSource[]> {
+  const allCharacterWorldbooks =
+    characterWorldbookBindings.value.length > 0
+      ? characterWorldbookBindings.value
+      : await collectAllCharacterWorldbookBindings();
   const bindings = {
     globalNames: typeof getGlobalWorldbookNames === 'function' ? getGlobalWorldbookNames() : undefined,
     charWorldbooks: typeof getCharWorldbookNames === 'function' ? getCharWorldbookNames('current') : undefined,
     chatName: typeof getChatWorldbookName === 'function' ? getChatWorldbookName('current') : undefined,
+    allCharacterWorldbooks,
   };
   const plan = createDuplicateWorldbookRebindPlan(deleteNames, keepName, bindings);
 
@@ -4130,6 +4257,19 @@ async function rebindWorldbookReferences(deleteNames: string[], keepName: string
   if (plan.chatName) {
     if (typeof rebindChatWorldbook !== 'function') throw new Error('聊天世界书重绑 API 不可用');
     await rebindChatWorldbook('current', plan.chatName);
+  }
+
+  if (plan.characterUpdates && plan.characterUpdates.length > 0) {
+    if (typeof updateCharacterWith !== 'function') throw new Error('角色卡主世界书重绑 API 不可用');
+    const deleted = new Set(deleteNames);
+    for (const update of plan.characterUpdates) {
+      await updateCharacterWith(update.characterName, character => {
+        if (deleted.has(character.worldbook ?? '')) {
+          character.worldbook = keepName;
+        }
+        return character;
+      });
+    }
   }
 
   return plan.sources;
@@ -4237,6 +4377,12 @@ function setOptimizerMode(mode: OptimizerMode): void {
   structureState.open = false;
   structureHighlightSource.value = null;
   resetPreviewManualState();
+}
+
+function setDedupeStrategy(strategy: DuplicateWorldbookStrategy): void {
+  if (dedupeStrategy.value === strategy) return;
+  dedupeStrategy.value = strategy;
+  resetDedupeState();
 }
 
 function setStructureHighlight(key: string): void {
@@ -4602,6 +4748,7 @@ function readOptimizerFilterPreference(): OptimizerFilterPreference {
     previewSortMode: 'custom',
     cacheEntryScope: 'enabled',
     defaultWorldbookSelection: 'active',
+    dedupeStrategy: 'balanced',
   };
   try {
     const raw = window.localStorage?.getItem(OPTIMIZER_FILTER_PREF_KEY);
@@ -4625,6 +4772,7 @@ function readOptimizerFilterPreference(): OptimizerFilterPreference {
       defaultWorldbookSelection: isDefaultWorldbookSelection(value.defaultWorldbookSelection)
         ? value.defaultWorldbookSelection
         : fallback.defaultWorldbookSelection,
+      dedupeStrategy: isDedupeStrategy(value.dedupeStrategy) ? value.dedupeStrategy : fallback.dedupeStrategy,
     };
   } catch (error) {
     console.warn(`[世界书缓存优化器] 读取过滤器偏好失败：${formatError(error)}`);
@@ -4643,6 +4791,7 @@ function persistOptimizerFilterPreference(): void {
         previewSortMode: previewSortMode.value,
         cacheEntryScope: cacheEntryScope.value,
         defaultWorldbookSelection: defaultWorldbookSelection.value,
+        dedupeStrategy: dedupeStrategy.value,
       } satisfies OptimizerFilterPreference),
     );
   } catch (error) {
@@ -4678,6 +4827,10 @@ function isCacheEntryScope(value: unknown): value is CacheEntryScope {
 
 function isDefaultWorldbookSelection(value: unknown): value is DefaultWorldbookSelection {
   return value === 'active' || value === 'global' || value === 'character' || value === 'chat';
+}
+
+function isDedupeStrategy(value: unknown): value is DuplicateWorldbookStrategy {
+  return value === 'conservative' || value === 'balanced' || value === 'aggressive';
 }
 
 function isBookSourceFilter(value: unknown): value is BookSourceFilter {
@@ -6598,13 +6751,18 @@ select:disabled {
   top: 0;
   z-index: 5;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 18px 20px 16px;
   border-bottom: 1px solid var(--wbm-border-soft);
   background: rgba(17, 17, 19, 0.96);
   backdrop-filter: blur(18px);
+}
+
+.wbm-header > div:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .wbm-header h2,
@@ -6617,8 +6775,15 @@ select:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   min-width: 0;
+}
+
+.wbm-header h2 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .wbm-version {
@@ -6631,17 +6796,9 @@ select:disabled {
 
 .wbm-version-manager-btn {
   position: relative;
-  width: 30px;
-  height: 30px;
   border: 1px solid transparent;
-  border-radius: 999px;
-  padding: 0;
   background: rgba(42, 43, 47, 0.62);
   color: var(--wbm-muted);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
 }
 
 .wbm-version-manager-btn:hover {
@@ -6685,7 +6842,10 @@ select:disabled {
 .wbm-header-actions {
   display: flex;
   align-items: center;
+  align-self: center;
   gap: 8px;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
 }
 
 .wbm-work-section {
@@ -6939,15 +7099,15 @@ select:disabled {
 }
 
 .wbm-dedupe-body {
-  grid-template-columns: minmax(420px, 1fr) minmax(280px, 360px);
+  grid-template-columns: minmax(300px, 360px) minmax(420px, 1fr);
 }
 
 .wbm-dedupe-body .wbm-books-panel {
-  grid-column: 1;
+  grid-column: 2;
 }
 
 .wbm-dedupe-rule-panel {
-  grid-column: 2;
+  grid-column: 1;
   grid-row: 1;
 }
 
@@ -7097,6 +7257,36 @@ select:disabled {
   color: var(--wbm-muted);
   font-size: 12px;
   font-weight: 600;
+}
+
+.wbm-dedupe-strategy-switch {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.wbm-dedupe-strategy-switch .wbm-mode-option {
+  grid-template-columns: auto auto;
+  justify-content: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 8px 6px;
+}
+
+.wbm-dedupe-strategy-switch .wbm-mode-option.active {
+  box-shadow: inset 0 3px 0 var(--wbm-blue);
+}
+
+.wbm-dedupe-strategy-switch .wbm-mode-option i {
+  font-size: 14px;
+}
+
+.wbm-dedupe-strategy-switch .wbm-mode-option span {
+  display: block;
+}
+
+.wbm-dedupe-strategy-switch .wbm-mode-option strong {
+  font-size: 14px;
+  white-space: nowrap;
 }
 
 .wbm-rule-map {
@@ -9100,6 +9290,20 @@ select:disabled {
     min-height: 48px;
   }
 
+  .wbm-dedupe-strategy-switch {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .wbm-dedupe-strategy-switch .wbm-mode-option {
+    min-height: 42px;
+    padding: 7px 4px;
+  }
+
+  .wbm-dedupe-strategy-switch .wbm-mode-option i {
+    display: none;
+  }
+
   .wbm-rule-map-title,
   .wbm-rule-flow-row {
     grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr);
@@ -9124,10 +9328,15 @@ select:disabled {
     padding: 10px 12px;
   }
 
+  .wbm-header-actions {
+    gap: 7px;
+  }
+
   .wbm-header h2 {
     font-size: 20px;
   }
 
+  .wbm-header-actions .wbm-icon-btn,
   .wbm-version-manager-btn {
     width: 44px;
     height: 44px;
@@ -9332,11 +9541,11 @@ select:disabled {
   }
 
   .wbm-dedupe-body .wbm-books-panel {
-    order: 1;
+    order: 2;
   }
 
   .wbm-dedupe-rule-panel {
-    order: 2;
+    order: 1;
   }
 
   .wbm-dedupe-actions > .wbm-primary-btn {

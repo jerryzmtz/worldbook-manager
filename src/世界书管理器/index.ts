@@ -9,7 +9,7 @@ import {
 
 const OPEN_MANAGER_BUTTON = '世界书缓存优化器';
 const OPEN_CACHE_INSPECTOR_BUTTON = '缓存命中对比';
-const OPEN_DEDUPE_BUTTON = '世界书版本去重';
+const OPEN_DEDUPE_BUTTON = '世界书智能去重';
 const LEGACY_OPEN_MANAGER_BUTTONS = ['世界书管理', '打开世界书批量管理器'];
 const OPEN_MANAGER_EVENT = 'worldbook-manager:open';
 const OPEN_CACHE_INSPECTOR_EVENT = 'worldbook-manager:open-cache-inspector';
@@ -77,7 +77,7 @@ $(() => {
     window.dispatchEvent(new CustomEvent(OPEN_CACHE_INSPECTOR_EVENT));
   });
   dedupeButtonEventHandle = eventOn(getButtonEvent(OPEN_DEDUPE_BUTTON), () => {
-    console.info('[世界书版本去重] 收到脚本按钮事件');
+    console.info('[世界书智能去重] 收到脚本按钮事件');
     window.dispatchEvent(new CustomEvent(OPEN_DEDUPE_EVENT));
   });
   (window as WorldbookManagerWindow)[RUNTIME_GLOBAL_KEY] = { destroy: destroyRuntime };
