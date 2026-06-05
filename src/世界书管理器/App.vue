@@ -40,11 +40,11 @@
             <i class="fa-solid fa-gear"></i>
           </button>
           <button
-            v-if="activePanel === 'optimizer' || activePanel === 'cacheInspector'"
+            v-if="activePanel === 'optimizer' || activePanel === 'cacheInspector' || activePanel === 'dedupe'"
             class="wbm-icon-btn wbm-tutorial-trigger"
             type="button"
-            :title="activePanel === 'cacheInspector' ? '播放缓存命中对比教程' : '播放教程'"
-            :aria-label="activePanel === 'cacheInspector' ? '播放缓存命中对比教程' : '播放教程'"
+            :title="tutorialButtonTitle"
+            :aria-label="tutorialButtonTitle"
             data-wbm-tutorial-trigger
             :disabled="activePanel !== 'cacheInspector' && isBusy"
             @click="startTutorial"
@@ -74,7 +74,7 @@
       <CacheInspectorPanel v-if="activePanel === 'cacheInspector'" />
 
       <section v-if="activePanel === 'dedupe'" class="wbm-work-section wbm-dedupe-section">
-        <div class="wbm-section-toolbar">
+        <div class="wbm-section-toolbar" data-wbm-tutorial="dedupe-config">
           <div>
             <h3>去重配置</h3>
             <span>规则策略 · 世界书选择 · 应用确认</span>
@@ -86,7 +86,7 @@
         </div>
 
         <main class="wbm-body wbm-dedupe-body" :aria-busy="isBusy">
-          <section class="wbm-panel wbm-books-panel">
+          <section class="wbm-panel wbm-books-panel" data-wbm-tutorial="dedupe-books">
             <div class="wbm-panel-title">
               <h3>世界书</h3>
               <span class="wbm-inline-stat">{{ selectedBooks.size }}/{{ worldbookNames.length }} 本</span>
@@ -141,7 +141,7 @@
               正在计算世界书信息 {{ metadataProgress.loaded }}/{{ metadataProgress.total }}
             </div>
 
-            <div class="wbm-row-actions">
+            <div class="wbm-row-actions" data-wbm-tutorial="dedupe-selection">
               <button class="wbm-small-btn" type="button" :disabled="isBusy || !dedupeApiReady" @click="selectActiveBooks">
                 自动选择
               </button>
@@ -194,7 +194,7 @@
             </div>
           </section>
 
-          <section class="wbm-panel wbm-rules-panel wbm-dedupe-rule-panel">
+          <section class="wbm-panel wbm-rules-panel wbm-dedupe-rule-panel" data-wbm-tutorial="dedupe-rules">
             <div class="wbm-panel-title">
               <h3>规则区</h3>
               <span class="wbm-inline-stat">{{ currentDedupeStrategyOption.label }} · 最新版本优先</span>
@@ -237,8 +237,9 @@
         </div>
 
         <section class="wbm-preview wbm-dedupe-preview">
-          <div class="wbm-preview-actions wbm-dedupe-actions">
+          <div class="wbm-preview-actions wbm-dedupe-actions" data-wbm-tutorial="dedupe-generate">
             <button
+              v-if="!dedupeScanProgress.running"
               class="wbm-primary-btn wbm-generate-action"
               type="button"
               :disabled="isBusy || !canGenerateDedupePreview"
@@ -248,7 +249,18 @@
               生成方案
             </button>
             <button
+              v-else
+              class="wbm-danger-btn wbm-generate-action"
+              type="button"
+              :disabled="dedupeScanProgress.aborting"
+              @click="cancelDedupeScan"
+            >
+              <i class="fa-solid fa-ban"></i>
+              {{ dedupeScanProgress.aborting ? '正在中止' : '中止扫描' }}
+            </button>
+            <button
               class="wbm-primary-btn wbm-apply-action"
+              data-wbm-tutorial="dedupe-apply"
               type="button"
               :disabled="isBusy || !canApplyDedupe"
               @click="confirmDedupeApply"
@@ -257,6 +269,23 @@
               应用去重
             </button>
             <div class="wbm-filter-stats" aria-live="polite">{{ dedupeSelectionLabel }}</div>
+          </div>
+
+          <div v-if="dedupeScanVisible" class="wbm-dedupe-progress" aria-live="polite">
+            <div class="wbm-dedupe-progress-head">
+              <strong>{{ dedupeScanStageLabel }}</strong>
+              <span>{{ dedupeScanProgressLabel }}</span>
+            </div>
+            <div
+              class="wbm-dedupe-progress-track"
+              role="progressbar"
+              :aria-valuemin="0"
+              :aria-valuemax="100"
+              :aria-valuenow="dedupeScanPercent"
+              :aria-label="dedupeScanStageLabel"
+            >
+              <span :style="{ width: `${dedupeScanPercent}%` }"></span>
+            </div>
           </div>
 
           <div v-if="dedupeApplyResults.length > 0" class="wbm-apply-results wbm-dedupe-results">
@@ -270,7 +299,7 @@
             </span>
           </div>
 
-          <div class="wbm-dedupe-group-list">
+          <div class="wbm-dedupe-group-list" data-wbm-tutorial="dedupe-groups">
             <article
               v-for="group in dedupeGroups"
               :key="group.id"
@@ -1557,17 +1586,20 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import CacheInspectorPanel from './cache-inspector/CacheInspectorPanel.vue';
 import { createBlueEntryMergePlan, type MergeGroup } from './blue-entry-merge';
 import {
-  createDuplicateWorldbookPlan,
+  DuplicateWorldbookPlanAbortError,
+  createDuplicateWorldbookPlanAsync,
   createDuplicateWorldbookRebindPlan,
   type DuplicateApplyResult,
+  type DuplicateWorldbookPlanProgress,
   type DuplicateWorldbookCandidate,
   type DuplicateWorldbookCharacterBinding,
+  type DuplicateWorldbookCharacterRebind,
   type DuplicateWorldbookGroup,
   type DuplicateWorldbookSnapshot,
   type DuplicateWorldbookSource,
   type DuplicateWorldbookStrategy,
 } from './duplicate-worldbook';
-import { createCacheInspectorTutorial, createWorldbookTutorial } from './tutorial';
+import { createCacheInspectorTutorial, createDedupeTutorial, createWorldbookTutorial } from './tutorial';
 import {
   CUSTOM_VERSION_IMPORT_SOURCE_ID,
   DEFAULT_VERSION_IMPORT_TEMPLATE,
@@ -1736,6 +1768,18 @@ type DedupeConfirmState = {
   deleteCount: number;
   rebindCount: number;
   characterRebindCount: number;
+};
+
+type DedupeScanStage = 'idle' | 'reading' | DuplicateWorldbookPlanProgress['stage'] | 'aborted';
+
+type DedupeScanProgressState = {
+  running: boolean;
+  aborting: boolean;
+  aborted: boolean;
+  stage: DedupeScanStage;
+  current: number;
+  total: number;
+  message: string;
 };
 
 type LoadWorldbooksOptions = {
@@ -2139,6 +2183,7 @@ let metadataRunId = 0;
 const managerRootElement = ref<HTMLElement | null>(null);
 const tutorial = createWorldbookTutorial({ root: () => managerRootElement.value });
 const cacheInspectorTutorial = createCacheInspectorTutorial({ root: () => managerRootElement.value });
+const dedupeTutorial = createDedupeTutorial({ root: () => managerRootElement.value });
 let lastTutorialStartAt = 0;
 
 const STABLE_MACROS = new Set([
@@ -2274,6 +2319,15 @@ const bookSources = ref<Record<string, BookSource[]>>({});
 const characterWorldbookBindings = ref<DuplicateWorldbookCharacterBinding[]>([]);
 const bookMetadata = ref<Record<string, BookMetadata>>({});
 const metadataProgress = reactive<MetadataProgress>({ loaded: 0, total: 0, running: false });
+const dedupeScanProgress = reactive<DedupeScanProgressState>({
+  running: false,
+  aborting: false,
+  aborted: false,
+  stage: 'idle',
+  current: 0,
+  total: 0,
+  message: '',
+});
 const bookListElement = ref<HTMLElement | null>(null);
 const previewRows = ref<PreviewChange[]>([]);
 const applyResults = ref<ApplyResult[]>([]);
@@ -2288,6 +2342,8 @@ const dedupeConfirmState = reactive<DedupeConfirmState>({
   rebindCount: 0,
   characterRebindCount: 0,
 });
+let dedupeScanController: AbortController | null = null;
+let dedupeScanRunId = 0;
 const previewFilter = ref<PreviewFilter>(optimizerFilterPreference.previewFilter);
 const previewSortMode = ref<PreviewSortMode>(optimizerFilterPreference.previewSortMode);
 const expandedPreviewIds = ref<Set<string>>(new Set());
@@ -2348,6 +2404,12 @@ const activePanelTitle = computed(() => {
   if (activePanel.value === 'cacheInspector') return '缓存命中对比';
   if (activePanel.value === 'dedupe') return '世界书智能去重';
   return '世界书缓存优化器';
+});
+
+const tutorialButtonTitle = computed(() => {
+  if (activePanel.value === 'cacheInspector') return '播放缓存命中对比教程';
+  if (activePanel.value === 'dedupe') return '播放智能去重教程';
+  return '播放教程';
 });
 
 const latestVersion = computed(() => versionCatalog.value.latestVersion);
@@ -2730,7 +2792,30 @@ const previewSummary = computed(() => {
 
 const canApply = computed(() => previewSummary.value.changed > 0 && apiReady.value);
 
-const canGenerateDedupePreview = computed(() => dedupeApiReady.value && selectedBooks.value.size >= 2);
+const canGenerateDedupePreview = computed(
+  () => dedupeApiReady.value && selectedBooks.value.size >= 2 && !dedupeScanProgress.running,
+);
+
+const dedupeScanVisible = computed(() => dedupeScanProgress.running || dedupeScanProgress.aborted);
+const dedupeScanPercent = computed(() => {
+  if (dedupeScanProgress.total <= 0) return dedupeScanProgress.running ? 8 : 0;
+  return Math.min(100, Math.max(0, Math.round((dedupeScanProgress.current / dedupeScanProgress.total) * 100)));
+});
+const dedupeScanStageLabel = computed(() => {
+  if (dedupeScanProgress.stage === 'reading') return '读取世界书';
+  if (dedupeScanProgress.stage === 'index') return '建立索引';
+  if (dedupeScanProgress.stage === 'compare') return '比较内容';
+  if (dedupeScanProgress.stage === 'finalize') return '整理候选';
+  if (dedupeScanProgress.stage === 'aborted') return '已中止';
+  return '准备扫描';
+});
+const dedupeScanProgressLabel = computed(() => {
+  if (dedupeScanProgress.stage === 'aborted') return dedupeScanProgress.message || '已中止，本次没有生成方案。';
+  const progress =
+    dedupeScanProgress.total > 0 ? `${dedupeScanProgress.current}/${dedupeScanProgress.total}` : '准备中';
+  const message = dedupeScanProgress.message ? ` · ${dedupeScanProgress.message}` : '';
+  return `${progress}${message}`;
+});
 
 const dedupeSelectedGroups = computed(() =>
   dedupeGroups.value.filter(group => isDedupeGroupSelected(group.id) && dedupeDeleteCandidates(group).length > 0),
@@ -2750,7 +2835,9 @@ const dedupeSelectedCharacterRebindCount = computed(() =>
   dedupeSelectedGroups.value.reduce((sum, group) => sum + dedupeGroupCharacterRebindCount(group), 0),
 );
 
-const canApplyDedupe = computed(() => dedupeApiReady.value && dedupeSelectedDeleteCount.value > 0);
+const canApplyDedupe = computed(
+  () => dedupeApiReady.value && dedupeSelectedDeleteCount.value > 0 && !dedupeScanProgress.running,
+);
 
 const dedupeSummaryLabel = computed(() => {
   if (dedupeGroups.value.length === 0) return '尚未生成方案';
@@ -3064,8 +3151,10 @@ onUnmounted(() => {
   window.visualViewport?.removeEventListener('resize', syncVisualViewportHeight);
   window.visualViewport?.removeEventListener('scroll', syncVisualViewportHeight);
   window.removeEventListener('resize', syncVisualViewportHeight);
+  dedupeScanController?.abort();
   tutorial.close();
   cacheInspectorTutorial.close();
+  dedupeTutorial.close();
 });
 
 function openManager(): void {
@@ -3073,6 +3162,7 @@ function openManager(): void {
   activePanel.value = 'optimizer';
   isOpen.value = true;
   cacheInspectorTutorial.close();
+  dedupeTutorial.close();
   syncVisualViewportHeight();
   applyWarningDismissed.value = readApplyWarningDismissed();
   blueTokenWarningDismissed.value = readBlueTokenWarningDismissed();
@@ -3089,6 +3179,7 @@ function openCacheInspector(): void {
   isOpen.value = true;
   syncVisualViewportHeight();
   tutorial.close();
+  dedupeTutorial.close();
   closeTransientModals();
   scheduleTutorialStart();
 }
@@ -3100,12 +3191,14 @@ function openDedupe(): void {
   syncVisualViewportHeight();
   tutorial.close();
   cacheInspectorTutorial.close();
+  dedupeTutorial.close();
   closeTransientModals();
   selectionInitialized.value = false;
   resetDedupeState();
   if (dedupeApiReady.value) {
     void loadWorldbooksForDedupe();
   }
+  scheduleTutorialStart();
 }
 
 function closeManager(): void {
@@ -3113,6 +3206,7 @@ function closeManager(): void {
   isOpen.value = false;
   tutorial.close();
   cacheInspectorTutorial.close();
+  dedupeTutorial.close();
   ruleHelpOpen.value = false;
   optimizerSettingsOpen.value = false;
   confirmState.open = false;
@@ -3388,10 +3482,18 @@ function startTutorial(): void {
   const now = Date.now();
   if (now - lastTutorialStartAt < 160) return;
   lastTutorialStartAt = now;
-  console.info(activePanel.value === 'cacheInspector' ? '[缓存命中对比] 播放内置教程' : '[世界书缓存优化器] 播放内置教程');
+  const tutorialLogName =
+    activePanel.value === 'cacheInspector'
+      ? '缓存命中对比'
+      : activePanel.value === 'dedupe'
+        ? '世界书智能去重'
+        : '世界书缓存优化器';
+  console.info(`[${tutorialLogName}] 播放内置教程`);
   void nextTick(() => {
     if (activePanel.value === 'cacheInspector') {
       cacheInspectorTutorial.start({ manual: true, interrupt: true });
+    } else if (activePanel.value === 'dedupe') {
+      dedupeTutorial.start({ manual: true, interrupt: true });
     } else {
       tutorial.start({ manual: true, interrupt: true });
     }
@@ -3404,6 +3506,8 @@ function scheduleTutorialStart(): void {
       if (!isOpen.value) return;
       if (activePanel.value === 'cacheInspector') {
         cacheInspectorTutorial.maybeStart();
+      } else if (activePanel.value === 'dedupe') {
+        dedupeTutorial.maybeStart();
       } else {
         tutorial.maybeStart();
       }
@@ -3612,6 +3716,9 @@ function refreshBookSources(): void {
 }
 
 async function collectAllCharacterWorldbookBindings(): Promise<DuplicateWorldbookCharacterBinding[]> {
+  const localBindings = collectLocalCharacterWorldbookBindings();
+  if (localBindings) return localBindings;
+
   if (typeof getCharacterNames !== 'function' || typeof getCharacter !== 'function') return [];
   const bindings: DuplicateWorldbookCharacterBinding[] = [];
   const failures: string[] = [];
@@ -3640,6 +3747,55 @@ async function collectAllCharacterWorldbookBindings(): Promise<DuplicateWorldboo
     notifyError(`部分角色卡绑定读取失败：${failures.slice(0, 3).join('；')}`);
   }
   return bindings;
+}
+
+function collectLocalCharacterWorldbookBindings(): DuplicateWorldbookCharacterBinding[] | null {
+  const context = getSillyTavernContext();
+  const characters = Array.isArray(context?.characters) ? context.characters : null;
+  if (!characters) return null;
+
+  const bindings: DuplicateWorldbookCharacterBinding[] = [];
+  for (let index = 0; index < characters.length; index += 1) {
+    const binding = createLocalCharacterWorldbookBinding(characters[index], index);
+    if (binding) bindings.push(binding);
+  }
+  return bindings;
+}
+
+function createLocalCharacterWorldbookBinding(
+  value: unknown,
+  characterIndex: number,
+): DuplicateWorldbookCharacterBinding | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const data = toRecord(record.data);
+  const displayName = readString(data, 'name') ?? readString(record, 'name') ?? readString(record, 'avatar');
+  if (!displayName) return null;
+  const characterId = readString(record, 'avatar');
+  const extensions = toRecord(data?.extensions);
+  const worldbook = normalizeOptionalString(readString(extensions, 'world') ?? readString(record, 'worldbook'));
+
+  return {
+    characterName: displayName,
+    characterId: characterId ?? undefined,
+    characterIndex,
+    worldbook,
+  };
+}
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
+}
+
+function readString(record: Record<string, unknown> | null, key: string): string | null {
+  const value = record?.[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function normalizeOptionalString(value: string | null): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function resolveAvailableWorldbookName(name: string | null | undefined, available: Map<string, string>): string | null {
@@ -3954,6 +4110,46 @@ function toggleBook(name: string): void {
   resetDedupeState();
 }
 
+function setDedupeScanProgress(
+  stage: DedupeScanStage,
+  current: number,
+  total: number,
+  message: string,
+  options: { running?: boolean; aborted?: boolean; aborting?: boolean } = {},
+): void {
+  dedupeScanProgress.stage = stage;
+  dedupeScanProgress.current = current;
+  dedupeScanProgress.total = total;
+  dedupeScanProgress.message = message;
+  dedupeScanProgress.running = options.running ?? dedupeScanProgress.running;
+  dedupeScanProgress.aborted = options.aborted ?? false;
+  dedupeScanProgress.aborting = options.aborting ?? false;
+}
+
+function resetDedupeScanProgress(force = false): void {
+  if (dedupeScanProgress.running && !force) return;
+  setDedupeScanProgress('idle', 0, 0, '', { running: false, aborted: false, aborting: false });
+}
+
+function markDedupeScanAborted(): void {
+  setDedupeScanProgress('aborted', 1, 1, '已中止，本次没有生成方案。', {
+    running: false,
+    aborted: true,
+    aborting: false,
+  });
+}
+
+function throwIfDedupeScanAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw new DuplicateWorldbookPlanAbortError();
+}
+
+function cancelDedupeScan(): void {
+  if (!dedupeScanProgress.running || !dedupeScanController) return;
+  dedupeScanProgress.aborting = true;
+  dedupeScanProgress.message = '正在停止本次扫描';
+  dedupeScanController.abort();
+}
+
 function resetPreviewManualState(): void {
   entryActionOverrides.value = {};
   customEntryOverrides.value = {};
@@ -3971,6 +4167,7 @@ function resetDedupeState(): void {
   characterWorldbookBindings.value = [];
   dedupeConfirmState.open = false;
   dedupeConfirmState.characterRebindCount = 0;
+  resetDedupeScanProgress();
 }
 
 async function generateDefaultPreview(): Promise<void> {
@@ -3980,6 +4177,10 @@ async function generateDefaultPreview(): Promise<void> {
 
 async function generateDedupePreview(): Promise<void> {
   if (!canGenerateDedupePreview.value) return;
+  const runId = ++dedupeScanRunId;
+  const controller = new AbortController();
+  dedupeScanController = controller;
+  const selectedBookNames = [...selectedBooks.value];
   isBusy.value = true;
   dedupeGroups.value = [];
   dedupeSelectedGroupIds.value = new Set();
@@ -3987,12 +4188,22 @@ async function generateDedupePreview(): Promise<void> {
   dedupeApplyResults.value = [];
   const snapshots: DuplicateWorldbookSnapshot[] = [];
   const failures: string[] = [];
+  setDedupeScanProgress('reading', 0, selectedBookNames.length, '准备读取世界书', {
+    running: true,
+    aborted: false,
+    aborting: false,
+  });
 
   try {
-    for (const bookName of selectedBooks.value) {
+    for (let index = 0; index < selectedBookNames.length; index += 1) {
+      throwIfDedupeScanAborted(controller.signal);
+      const bookName = selectedBookNames[index];
+      setDedupeScanProgress('reading', index, selectedBookNames.length, bookName, { running: true });
       try {
         const entries = await getWorldbook(bookName);
+        throwIfDedupeScanAborted(controller.signal);
         const originalData = await loadOriginalWorldbookData(bookName).catch(() => ({}));
+        throwIfDedupeScanAborted(controller.signal);
         snapshots.push({
           name: bookName,
           entries,
@@ -4001,15 +4212,27 @@ async function generateDedupePreview(): Promise<void> {
           loadedAt: Date.now(),
         });
       } catch (error) {
+        if (error instanceof DuplicateWorldbookPlanAbortError) throw error;
         failures.push(`${bookName}: ${formatError(error)}`);
       }
+      setDedupeScanProgress('reading', index + 1, selectedBookNames.length, bookName, { running: true });
     }
 
+    throwIfDedupeScanAborted(controller.signal);
+    setDedupeScanProgress('finalize', 0, 1, '正在读取角色卡绑定', { running: true });
     characterWorldbookBindings.value = await collectAllCharacterWorldbookBindings();
-    const plan = createDuplicateWorldbookPlan(snapshots, toDedupeSourceMap(bookSources.value), {
+    throwIfDedupeScanAborted(controller.signal);
+    const plan = await createDuplicateWorldbookPlanAsync(snapshots, toDedupeSourceMap(bookSources.value), {
       keepPriority: 'latest_version',
       strategy: dedupeStrategy.value,
+      signal: controller.signal,
+      yieldEvery: 1,
+      onProgress: progress => {
+        if (runId !== dedupeScanRunId) return;
+        setDedupeScanProgress(progress.stage, progress.current, progress.total, progress.message, { running: true });
+      },
     });
+    if (runId !== dedupeScanRunId) return;
     dedupeGroups.value = plan.groups;
     dedupeSelectedGroupIds.value = new Set(plan.groups.filter(group => group.defaultSelected).map(group => group.id));
 
@@ -4019,8 +4242,25 @@ async function generateDedupePreview(): Promise<void> {
     if (plan.groups.length === 0) {
       notifyInfo('没有发现可处理的世界书重复候选。');
     }
+    resetDedupeScanProgress(true);
+  } catch (error) {
+    if (error instanceof DuplicateWorldbookPlanAbortError) {
+      if (runId === dedupeScanRunId) {
+        dedupeGroups.value = [];
+        dedupeSelectedGroupIds.value = new Set();
+        dedupeKeepOverrides.value = {};
+        markDedupeScanAborted();
+      }
+    } else {
+      notifyError(`生成去重方案失败：${formatError(error)}`);
+      resetDedupeScanProgress(true);
+    }
   } finally {
-    isBusy.value = false;
+    if (runId === dedupeScanRunId) {
+      isBusy.value = false;
+      dedupeScanController = null;
+      if (dedupeScanProgress.running) resetDedupeScanProgress(true);
+    }
   }
 }
 
@@ -4259,17 +4499,74 @@ async function rebindWorldbookReferences(deleteNames: string[], keepName: string
   if (plan.characterUpdates && plan.characterUpdates.length > 0) {
     if (typeof updateCharacterWith !== 'function') throw new Error('角色卡主世界书重绑 API 不可用');
     const deleted = new Set(deleteNames);
+    const skippedCharacters: string[] = [];
+    const context = getSillyTavernContext();
     for (const update of plan.characterUpdates) {
-      await updateCharacterWith(update.characterName, character => {
-        if (deleted.has(character.worldbook ?? '')) {
-          character.worldbook = keepName;
+      let writtenByIndex = false;
+      if (typeof update.characterIndex === 'number' && typeof context?.writeExtensionField === 'function') {
+        try {
+          await context.writeExtensionField(update.characterIndex, 'world', keepName);
+          writtenByIndex = true;
+        } catch (error) {
+          console.warn('[世界书智能去重] 按角色索引更新主世界书失败，尝试使用角色 API 兜底。', {
+            characterName: update.characterName,
+            characterId: update.characterId,
+            error,
+          });
         }
-        return character;
-      });
+      }
+      if (writtenByIndex) continue;
+
+      const target = resolveCharacterUpdateTarget(update);
+      if (!target) {
+        skippedCharacters.push(update.characterName);
+        continue;
+      }
+
+      try {
+        await updateCharacterWith(target, character => {
+          if (deleted.has(character.worldbook ?? '')) {
+            character.worldbook = keepName;
+          }
+          return character;
+        });
+      } catch (error) {
+        if (!isCharacterNotFoundError(error)) throw error;
+        skippedCharacters.push(update.characterName);
+      }
+    }
+    if (skippedCharacters.length > 0) {
+      console.warn(
+        `[世界书智能去重] ${skippedCharacters.length} 张角色卡在应用时无法重新定位，已跳过主世界书重绑：${skippedCharacters
+          .slice(0, 5)
+          .join('、')}`,
+      );
     }
   }
 
   return plan.sources;
+}
+
+function resolveCharacterUpdateTarget(update: DuplicateWorldbookCharacterRebind): string | null {
+  const candidates = [update.characterId, update.characterName].filter(
+    (value): value is string => typeof value === 'string' && value.trim().length > 0,
+  );
+  if (candidates.length === 0) return null;
+  if (typeof getCharData !== 'function') return candidates[0];
+
+  for (const candidate of candidates) {
+    try {
+      if (getCharData(candidate)) return candidate;
+    } catch {
+      // Local lookup is only a hint; fall through to the next identifier.
+    }
+  }
+
+  return candidates[0];
+}
+
+function isCharacterNotFoundError(error: unknown): boolean {
+  return /character not found|failed to get character|not found/i.test(formatError(error));
 }
 
 async function generatePreview(options: GeneratePreviewOptions = {}): Promise<void> {
@@ -7480,6 +7777,54 @@ select:disabled {
 
 .wbm-filter-stats {
   display: none;
+}
+
+.wbm-dedupe-progress {
+  display: grid;
+  gap: 7px;
+  margin: 0 0 10px;
+  padding: 9px 10px;
+  border: 1px solid rgba(77, 107, 254, 0.26);
+  border-radius: var(--wbm-radius-md);
+  background: var(--wbm-blue-softer);
+}
+
+.wbm-dedupe-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.wbm-dedupe-progress-head strong {
+  flex: 0 0 auto;
+  font-size: 13px;
+}
+
+.wbm-dedupe-progress-head span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--wbm-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wbm-dedupe-progress-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.52);
+}
+
+.wbm-dedupe-progress-track span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--wbm-blue-strong);
+  transition: width 160ms ease;
 }
 
 .wbm-blue-token-stats {

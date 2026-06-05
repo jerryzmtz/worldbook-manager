@@ -8,6 +8,8 @@ process.env.TS_NODE_COMPILER_OPTIONS = JSON.stringify({
 require('ts-node/register/transpile-only');
 
 const {
+  DuplicateWorldbookPlanAbortError,
+  createDuplicateWorldbookPlanAsync,
   createDuplicateWorldbookPlan,
   createDuplicateWorldbookRebindPlan,
   parseWorldbookVersionName,
@@ -207,6 +209,103 @@ test('aggressive mode accepts lower coverage and selects it by default', () => {
   assert.equal(plan.groups[0].defaultSelected, true);
 });
 
+test('async duplicate plan matches sync plan and reports progress', async () => {
+  const snapshots = [
+    {
+      name: '异步角色书 v1',
+      entries: [entry('身份', longContent('身份')), entry('住处', longContent('住处'))],
+    },
+    {
+      name: '异步角色书 v2',
+      entries: [entry('身份新版', longContent('身份')), entry('住处新版', longContent('住处'))],
+    },
+    {
+      name: '不相关资料',
+      entries: [entry('别的内容', longContent('别的内容'))],
+    },
+  ];
+  const syncPlan = createDuplicateWorldbookPlan(snapshots, {}, { strategy: 'balanced' });
+  const progressEvents = [];
+  const asyncPlan = await createDuplicateWorldbookPlanAsync(snapshots, {}, {
+    strategy: 'balanced',
+    yieldEvery: 1,
+    onProgress: progress => progressEvents.push(progress),
+  });
+
+  assert.deepEqual(
+    asyncPlan.groups.map(group => ({
+      keep: group.keepCandidate.name,
+      deletes: group.deleteCandidates.map(candidate => candidate.name),
+    })),
+    syncPlan.groups.map(group => ({
+      keep: group.keepCandidate.name,
+      deletes: group.deleteCandidates.map(candidate => candidate.name),
+    })),
+  );
+  assert.ok(progressEvents.some(progress => progress.stage === 'index'));
+  assert.ok(progressEvents.some(progress => progress.stage === 'compare'));
+  assert.ok(progressEvents.some(progress => progress.stage === 'finalize'));
+});
+
+test('async duplicate plan can be aborted before returning partial results', async () => {
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    () =>
+      createDuplicateWorldbookPlanAsync(
+        [
+          {
+            name: '中止测试 v1',
+            entries: [entry('A', longContent('A'))],
+          },
+          {
+            name: '中止测试 v2',
+            entries: [entry('A2', longContent('A'))],
+          },
+        ],
+        {},
+        { signal: controller.signal },
+      ),
+    error => error instanceof DuplicateWorldbookPlanAbortError,
+  );
+});
+
+test('async duplicate plan responds to abort during large entry comparisons', async () => {
+  const controller = new AbortController();
+  let compareStarted = false;
+
+  await assert.rejects(
+    () =>
+      createDuplicateWorldbookPlanAsync(
+        [
+          {
+            name: '大量条目测试 v1',
+            entries: Array.from({ length: 90 }, (_, index) => entry(`旧条目${index}`, longContent(`旧条目${index}`))),
+          },
+          {
+            name: '大量条目测试 v2',
+            entries: Array.from({ length: 90 }, (_, index) => entry(`新条目${index}`, longContent(`新条目${index}`))),
+          },
+        ],
+        {},
+        {
+          signal: controller.signal,
+          strategy: 'balanced',
+          yieldEvery: 1,
+          onProgress: progress => {
+            if (progress.stage !== 'compare' || progress.current === 0 || compareStarted) return;
+            compareStarted = true;
+            setTimeout(() => controller.abort(), 0);
+          },
+        },
+      ),
+    error => error instanceof DuplicateWorldbookPlanAbortError,
+  );
+
+  assert.equal(compareStarted, true);
+});
+
 test('falls back to modified time and content size when versions are unclear', () => {
   const plan = createDuplicateWorldbookPlan(
     [
@@ -240,7 +339,7 @@ test('creates rebind plans for global, character, all character main bindings, a
     allCharacterWorldbooks: [
       { characterName: '角色A', worldbook: '旧书 v1' },
       { characterName: '角色B', worldbook: '其他书' },
-      { characterName: '角色C', worldbook: '旧书 v2' },
+      { characterName: '角色C', characterId: 'role-c.png', characterIndex: 2, worldbook: '旧书 v2' },
     ],
   });
 
@@ -254,7 +353,7 @@ test('creates rebind plans for global, character, all character main bindings, a
   assert.equal(plan.chatName, '旧书 v3');
   assert.deepEqual(plan.characterUpdates, [
     { characterName: '角色A', worldbook: '旧书 v3' },
-    { characterName: '角色C', worldbook: '旧书 v3' },
+    { characterName: '角色C', characterId: 'role-c.png', characterIndex: 2, worldbook: '旧书 v3' },
   ]);
 });
 

@@ -132,6 +132,15 @@ export type DuplicateWorldbookPlan = {
   };
 };
 
+export type DuplicateWorldbookPlanProgressStage = 'index' | 'compare' | 'finalize';
+
+export type DuplicateWorldbookPlanProgress = {
+  stage: DuplicateWorldbookPlanProgressStage;
+  current: number;
+  total: number;
+  message: string;
+};
+
 export type DuplicateApplyResult = {
   groupId: string;
   keepName: string;
@@ -146,15 +155,22 @@ export type DuplicateWorldbookPlanOptions = {
   strategy?: DuplicateWorldbookStrategy;
   lowConfidenceSimilarity?: number;
   lowConfidenceCoverage?: number;
+  signal?: AbortSignal;
+  onProgress?: (progress: DuplicateWorldbookPlanProgress) => void;
+  yieldEvery?: number;
 };
 
 export type DuplicateWorldbookCharacterBinding = {
   characterName: string;
+  characterId?: string;
+  characterIndex?: number;
   worldbook: string | null;
 };
 
 export type DuplicateWorldbookCharacterRebind = {
   characterName: string;
+  characterId?: string;
+  characterIndex?: number;
   worldbook: string;
 };
 
@@ -252,6 +268,8 @@ const HIGH_COVERAGE = 0.95;
 const ENTRY_CONTENT_MATCH_FLOOR = 0.55;
 const SHINGLE_SIZE = 5;
 const SHORT_TEXT_LENGTH = 24;
+const DEFAULT_ASYNC_YIELD_INTERVAL_MS = 12;
+const SHINGLE_SET_CACHE = new WeakMap<string[], Set<string>>();
 const STRATEGY_PROFILES: Record<DuplicateWorldbookStrategy, StrategyProfile> = {
   conservative: {
     strategy: 'conservative',
@@ -281,6 +299,13 @@ const STRATEGY_PROFILES: Record<DuplicateWorldbookStrategy, StrategyProfile> = {
     exactCoverage: 0.78,
   },
 };
+
+export class DuplicateWorldbookPlanAbortError extends Error {
+  constructor(message = '世界书去重扫描已中止') {
+    super(message);
+    this.name = 'DuplicateWorldbookPlanAbortError';
+  }
+}
 
 export function parseWorldbookVersionName(name: string): WorldbookNameVersionInfo {
   const cleanName = cleanupBookName(stripWorldbookExtension(name));
@@ -371,7 +396,59 @@ export function createDuplicateWorldbookPlan(
   options: DuplicateWorldbookPlanOptions = {},
 ): DuplicateWorldbookPlan {
   const profile = STRATEGY_PROFILES[options.strategy ?? 'balanced'];
-  const candidates = snapshots.map<DuplicateWorldbookCandidate>(snapshot => ({
+  const candidates = snapshots.map(snapshot => createDuplicateCandidate(snapshot, sources));
+  const pairs = findDuplicatePairs(candidates, profile, options);
+  return createDuplicatePlanFromCandidates(candidates, pairs, profile);
+}
+
+export async function createDuplicateWorldbookPlanAsync(
+  snapshots: DuplicateWorldbookSnapshot[],
+  sources: Record<string, DuplicateWorldbookSource[]> = {},
+  options: DuplicateWorldbookPlanOptions = {},
+): Promise<DuplicateWorldbookPlan> {
+  const profile = STRATEGY_PROFILES[options.strategy ?? 'balanced'];
+  const candidates: DuplicateWorldbookCandidate[] = [];
+  const yieldEvery = Math.max(1, Math.floor(options.yieldEvery ?? 12));
+
+  options.onProgress?.({
+    stage: 'index',
+    current: 0,
+    total: snapshots.length,
+    message: snapshots.length > 0 ? '准备建立世界书索引' : '没有需要扫描的世界书',
+  });
+
+  for (let index = 0; index < snapshots.length; index += 1) {
+    throwIfAborted(options.signal);
+    const snapshot = snapshots[index];
+    candidates.push(createDuplicateCandidate(snapshot, sources));
+    options.onProgress?.({
+      stage: 'index',
+      current: index + 1,
+      total: snapshots.length,
+      message: snapshot.name,
+    });
+    if ((index + 1) % yieldEvery === 0) await yieldToMainThread();
+  }
+
+  throwIfAborted(options.signal);
+  const pairs = await findDuplicatePairsAsync(candidates, profile, options);
+  throwIfAborted(options.signal);
+  options.onProgress?.({
+    stage: 'finalize',
+    current: 1,
+    total: 1,
+    message: '正在整理候选分组',
+  });
+  await yieldToMainThread();
+  throwIfAborted(options.signal);
+  return createDuplicatePlanFromCandidates(candidates, pairs, profile);
+}
+
+function createDuplicateCandidate(
+  snapshot: DuplicateWorldbookSnapshot,
+  sources: Record<string, DuplicateWorldbookSource[]>,
+): DuplicateWorldbookCandidate {
+  return {
     name: snapshot.name,
     versionInfo: parseWorldbookVersionName(snapshot.name),
     fingerprint: createWorldbookContentFingerprint(snapshot.entries),
@@ -385,9 +462,14 @@ export function createDuplicateWorldbookPlan(
     textSimilarityToKeep: 0,
     matchedEntryCountToKeep: 0,
     affectedCharacterCount: 0,
-  }));
+  };
+}
 
-  const pairs = findDuplicatePairs(candidates, profile, options);
+function createDuplicatePlanFromCandidates(
+  candidates: DuplicateWorldbookCandidate[],
+  pairs: DuplicatePair[],
+  profile: StrategyProfile,
+): DuplicateWorldbookPlan {
   const components = buildCandidateComponents(candidates, pairs);
   const groups = createDuplicateGroupsFromComponents(components, pairs, profile);
 
@@ -455,7 +537,12 @@ export function createDuplicateWorldbookRebindPlan(
     const characterUpdates: DuplicateWorldbookCharacterRebind[] = [];
     for (const binding of bindings.allCharacterWorldbooks) {
       if (!binding.worldbook || !deleted.has(binding.worldbook)) continue;
-      characterUpdates.push({ characterName: binding.characterName, worldbook: keepName });
+      characterUpdates.push({
+        characterName: binding.characterName,
+        ...(binding.characterId ? { characterId: binding.characterId } : {}),
+        ...(typeof binding.characterIndex === 'number' ? { characterIndex: binding.characterIndex } : {}),
+        worldbook: keepName,
+      });
     }
     if (characterUpdates.length > 0) {
       result.changed = true;
@@ -493,6 +580,99 @@ function findDuplicatePairs(
     }
   }
   return pairs;
+}
+
+async function findDuplicatePairsAsync(
+  candidates: DuplicateWorldbookCandidate[],
+  profile: StrategyProfile,
+  options: DuplicateWorldbookPlanOptions,
+): Promise<DuplicatePair[]> {
+  const pairs: DuplicatePair[] = [];
+  const total = Math.max(0, (candidates.length * (candidates.length - 1)) / 2);
+  const yieldEvery = Math.max(1, Math.floor(options.yieldEvery ?? 12));
+  const yieldBudget = createAsyncYieldBudget(options);
+  let checked = 0;
+
+  options.onProgress?.({
+    stage: 'compare',
+    current: 0,
+    total,
+    message: total > 0 ? '准备比较世界书内容' : '没有可比较的世界书组合',
+  });
+
+  for (let leftIndex = 0; leftIndex < candidates.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < candidates.length; rightIndex += 1) {
+      throwIfAborted(options.signal);
+      const left = candidates[leftIndex];
+      const right = candidates[rightIndex];
+      const sameFamily = left.versionInfo.normalizedFamilyName === right.versionInfo.normalizedFamilyName;
+      checked += 1;
+      options.onProgress?.({
+        stage: 'compare',
+        current: checked,
+        total,
+        message: `${left.name} / ${right.name}`,
+      });
+
+      if (sameFamily || profile.compareAcrossFamilies) {
+        if (sameFamily || hasComparableWorldbookContent(left, right)) {
+          const comparison = await compareCandidatesAsync(left, right, sameFamily, options, yieldBudget);
+          if (isDuplicateComparison(comparison, profile, options)) {
+            pairs.push({
+              left,
+              right,
+              comparison,
+              confidence: classifyConfidence(comparison),
+            });
+          }
+        }
+      }
+
+      if (checked % yieldEvery === 0 || checked === total) {
+        await yieldToMainThread();
+        throwIfAborted(options.signal);
+      }
+    }
+  }
+
+  return pairs;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DuplicateWorldbookPlanAbortError();
+}
+
+function yieldToMainThread(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+type AsyncYieldBudget = {
+  intervalMs: number;
+  nextYieldAt: number;
+};
+
+function createAsyncYieldBudget(options: DuplicateWorldbookPlanOptions): AsyncYieldBudget {
+  const requestedYieldEvery = Math.max(1, Math.floor(options.yieldEvery ?? 3));
+  const intervalMs = Math.max(4, Math.min(DEFAULT_ASYNC_YIELD_INTERVAL_MS, requestedYieldEvery * 4));
+  return {
+    intervalMs,
+    nextYieldAt: nowMs() + intervalMs,
+  };
+}
+
+async function yieldForResponsiveAbort(
+  options: DuplicateWorldbookPlanOptions,
+  budget: AsyncYieldBudget,
+): Promise<void> {
+  throwIfAborted(options.signal);
+  if (nowMs() < budget.nextYieldAt) return;
+  await yieldToMainThread();
+  throwIfAborted(options.signal);
+  budget.nextYieldAt = nowMs() + budget.intervalMs;
+}
+
+function nowMs(): number {
+  return Date.now();
 }
 
 function buildCandidateComponents(
@@ -617,6 +797,24 @@ function compareCandidates(
 ): CandidateComparison {
   const fingerprint = compareFingerprints(left.fingerprint, right.fingerprint);
   const content = compareContentFingerprints(left.fingerprint, right.fingerprint);
+  return {
+    ...fingerprint,
+    ...content,
+    exact: fingerprint.exact || content.exact,
+    sameFamily,
+  };
+}
+
+async function compareCandidatesAsync(
+  left: DuplicateWorldbookCandidate,
+  right: DuplicateWorldbookCandidate,
+  sameFamily: boolean,
+  options: DuplicateWorldbookPlanOptions,
+  yieldBudget: AsyncYieldBudget,
+): Promise<CandidateComparison> {
+  const fingerprint = compareFingerprints(left.fingerprint, right.fingerprint);
+  await yieldForResponsiveAbort(options, yieldBudget);
+  const content = await compareContentFingerprintsAsync(left.fingerprint, right.fingerprint, options, yieldBudget);
   return {
     ...fingerprint,
     ...content,
@@ -940,7 +1138,46 @@ function compareContentFingerprints(
   const rightCoverage = directionalEntryContentCoverage(rightEntries, leftEntries);
   const leftText = toComparableText(left.enabledContentText || left.contentText);
   const rightText = toComparableText(right.enabledContentText || right.contentText);
-  const textSimilarity = compareTextContent(leftText, rightText);
+  const leftShingles = left.enabledEntryContentFingerprints.length > 0 ? left.enabledContentShingles : left.contentShingles;
+  const rightShingles = right.enabledEntryContentFingerprints.length > 0 ? right.enabledContentShingles : right.contentShingles;
+  const textSimilarity = compareTextContent(leftText, rightText, leftShingles, rightShingles);
+
+  return {
+    textSimilarity,
+    contentLeftCoverage: leftCoverage.coverage,
+    contentRightCoverage: rightCoverage.coverage,
+    contentSmallerCoverage: Math.max(leftCoverage.coverage, rightCoverage.coverage),
+    matchedLeftEntries: leftCoverage.matchedEntries,
+    matchedRightEntries: rightCoverage.matchedEntries,
+    matchedEntryCount: Math.max(leftCoverage.matchedEntries, rightCoverage.matchedEntries),
+    exact:
+      leftText.length > 0 &&
+      leftText === rightText &&
+      leftEntries.length === rightEntries.length &&
+      left.enabledEntryCount === right.enabledEntryCount,
+  };
+}
+
+async function compareContentFingerprintsAsync(
+  left: DuplicateWorldbookContentFingerprint,
+  right: DuplicateWorldbookContentFingerprint,
+  options: DuplicateWorldbookPlanOptions,
+  yieldBudget: AsyncYieldBudget,
+): Promise<ContentComparison> {
+  const leftEntries =
+    left.enabledEntryContentFingerprints.length > 0 ? left.enabledEntryContentFingerprints : left.entryContentFingerprints;
+  const rightEntries =
+    right.enabledEntryContentFingerprints.length > 0 ? right.enabledEntryContentFingerprints : right.entryContentFingerprints;
+  const leftCoverage = await directionalEntryContentCoverageAsync(leftEntries, rightEntries, options, yieldBudget);
+  await yieldForResponsiveAbort(options, yieldBudget);
+  const rightCoverage = await directionalEntryContentCoverageAsync(rightEntries, leftEntries, options, yieldBudget);
+  await yieldForResponsiveAbort(options, yieldBudget);
+  const leftText = toComparableText(left.enabledContentText || left.contentText);
+  const rightText = toComparableText(right.enabledContentText || right.contentText);
+  const leftShingles = left.enabledEntryContentFingerprints.length > 0 ? left.enabledContentShingles : left.contentShingles;
+  const rightShingles = right.enabledEntryContentFingerprints.length > 0 ? right.enabledContentShingles : right.contentShingles;
+  const textSimilarity = compareTextContent(leftText, rightText, leftShingles, rightShingles);
+  await yieldForResponsiveAbort(options, yieldBudget);
 
   return {
     textSimilarity,
@@ -991,6 +1228,46 @@ function directionalEntryContentCoverage(
   return { coverage: sourceWeight === 0 ? 0 : coveredWeight / sourceWeight, matchedEntries };
 }
 
+async function directionalEntryContentCoverageAsync(
+  sourceEntries: DuplicateWorldbookEntryContentFingerprint[],
+  targetEntries: DuplicateWorldbookEntryContentFingerprint[],
+  options: DuplicateWorldbookPlanOptions,
+  yieldBudget: AsyncYieldBudget,
+): Promise<{ coverage: number; matchedEntries: number }> {
+  const sourceWeight = sourceEntries.reduce((sum, entry) => sum + Math.max(1, entry.length), 0);
+  if (sourceEntries.length === 0) return { coverage: targetEntries.length === 0 ? 1 : 0, matchedEntries: 0 };
+  if (targetEntries.length === 0) return { coverage: 0, matchedEntries: 0 };
+
+  let coveredWeight = 0;
+  let matchedEntries = 0;
+  const usedTargets = new Set<number>();
+  const rankedMatches: Array<{ sourceIndex: number; targetIndex: number; score: number }> = [];
+
+  for (let sourceIndex = 0; sourceIndex < sourceEntries.length; sourceIndex += 1) {
+    for (let targetIndex = 0; targetIndex < targetEntries.length; targetIndex += 1) {
+      const score = compareEntryContent(sourceEntries[sourceIndex], targetEntries[targetIndex]);
+      if (score >= ENTRY_CONTENT_MATCH_FLOOR) rankedMatches.push({ sourceIndex, targetIndex, score });
+      await yieldForResponsiveAbort(options, yieldBudget);
+    }
+  }
+
+  rankedMatches.sort((left, right) => right.score - left.score);
+  const matchedSources = new Set<number>();
+  for (const match of rankedMatches) {
+    if (matchedSources.has(match.sourceIndex) || usedTargets.has(match.targetIndex)) {
+      await yieldForResponsiveAbort(options, yieldBudget);
+      continue;
+    }
+    matchedSources.add(match.sourceIndex);
+    usedTargets.add(match.targetIndex);
+    matchedEntries += 1;
+    coveredWeight += Math.max(1, sourceEntries[match.sourceIndex].length) * match.score;
+    await yieldForResponsiveAbort(options, yieldBudget);
+  }
+
+  return { coverage: sourceWeight === 0 ? 0 : coveredWeight / sourceWeight, matchedEntries };
+}
+
 function compareEntryContent(
   left: DuplicateWorldbookEntryContentFingerprint,
   right: DuplicateWorldbookEntryContentFingerprint,
@@ -1017,12 +1294,20 @@ function compareTextContent(
 }
 
 function jaccardSimilarity(leftValues: string[], rightValues: string[]): number {
-  const left = new Set(leftValues);
-  const right = new Set(rightValues);
+  const left = getCachedShingleSet(leftValues);
+  const right = getCachedShingleSet(rightValues);
   if (left.size === 0 && right.size === 0) return 1;
   if (left.size === 0 || right.size === 0) return 0;
   const overlap = countIntersection(left, right);
-  return overlap / new Set([...left, ...right]).size;
+  return overlap / (left.size + right.size - overlap);
+}
+
+function getCachedShingleSet(values: string[]): Set<string> {
+  const cached = SHINGLE_SET_CACHE.get(values);
+  if (cached) return cached;
+  const next = new Set(values);
+  SHINGLE_SET_CACHE.set(values, next);
+  return next;
 }
 
 function normalizeUnknownArray(value: unknown): string[] {
@@ -1105,8 +1390,10 @@ function compareFingerprints(
 
 function countIntersection(left: Set<string>, right: Set<string>): number {
   let count = 0;
-  for (const value of left) {
-    if (right.has(value)) count += 1;
+  const smaller = left.size <= right.size ? left : right;
+  const larger = left.size <= right.size ? right : left;
+  for (const value of smaller) {
+    if (larger.has(value)) count += 1;
   }
   return count;
 }

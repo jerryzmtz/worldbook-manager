@@ -50,6 +50,7 @@ type TutorialRect = {
 
 const WORLDBOOK_STORAGE_KEY = 'wbm_tutorial_state_v1';
 const CACHE_INSPECTOR_STORAGE_KEY = 'wbm_cache_inspector_tutorial_state_v1';
+const DEDUPE_STORAGE_KEY = 'wbm_dedupe_tutorial_state_v1';
 const STYLE_ID = 'wbm-tutorial-style';
 const OVERLAY_CLASS = 'wbm-tutorial-overlay';
 const STATE_REVISION = 1;
@@ -184,6 +185,51 @@ const CACHE_INSPECTOR_STEPS: TutorialStep[] = [
   },
 ];
 
+const DEDUPE_STEPS: TutorialStep[] = [
+  {
+    selector: '.wbm-dialog',
+    title: '世界书智能去重',
+    content: '这里会先生成去重建议，不会直接删除世界书。确认应用前，你可以逐组检查并取消勾选。',
+    placement: 'center',
+  },
+  {
+    selector: '[data-wbm-tutorial="dedupe-books"]',
+    title: '选择世界书',
+    content: '先选择要参与查重的世界书。搜索、来源和排序只影响列表显示，不会自动删除任何内容。',
+    placement: 'right',
+  },
+  {
+    selector: '[data-wbm-tutorial="dedupe-selection"]',
+    title: '批量选择',
+    content: '自动选择会按当前绑定挑出常用世界书。全选只选择当前列表里看得见的结果，清空会取消所有选择。',
+    placement: 'bottom',
+  },
+  {
+    selector: '[data-wbm-tutorial="dedupe-rules"]',
+    title: '选择策略',
+    content: '保守误报少，平衡适合默认使用，激进会找出更多可疑重复，也更需要你检查。',
+    placement: 'left',
+  },
+  {
+    selector: '[data-wbm-tutorial="dedupe-generate"]',
+    title: '生成方案',
+    content: '点击后只会生成候选方案。方案出来前，不会重绑角色卡，也不会删除世界书。',
+    placement: 'bottom',
+  },
+  {
+    selector: '[data-wbm-tutorial="dedupe-groups"]',
+    title: '检查候选',
+    content: '这里会显示置信度、相似度、绑定来源和警告。低置信度或跨名称候选，应用前要多看一眼。',
+    placement: 'top',
+  },
+  {
+    selector: '[data-wbm-tutorial="dedupe-apply"]',
+    title: '确认应用',
+    content: '确认后才会先重绑引用，再删除旧世界书。仍然不确定的候选，可以先取消勾选。',
+    placement: 'bottom',
+  },
+];
+
 const escapeHtml = (value: string): string =>
   value
     .replace(/&/g, '&amp;')
@@ -220,6 +266,10 @@ export function createWorldbookTutorial(options: WorldbookTutorialOptions = {}):
 
 export function createCacheInspectorTutorial(options: WorldbookTutorialOptions = {}): WorldbookTutorial {
   return createTutorial(options, CACHE_INSPECTOR_STEPS, CACHE_INSPECTOR_STORAGE_KEY, '缓存命中对比');
+}
+
+export function createDedupeTutorial(options: WorldbookTutorialOptions = {}): WorldbookTutorial {
+  return createTutorial(options, DEDUPE_STEPS, DEDUPE_STORAGE_KEY, '世界书智能去重');
 }
 
 function createTutorial(
