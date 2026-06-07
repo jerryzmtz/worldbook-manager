@@ -1645,7 +1645,7 @@ import {
   type VersionRelation,
 } from './version-manager';
 
-const APP_VERSION = 'v4.01';
+const APP_VERSION = 'v4.02';
 const EMPTY_VERSION_CATALOG: VersionCatalog = {
   latestVersion: null,
   versions: [],
@@ -4996,6 +4996,11 @@ function syncModalViewport(): void {
 
   getConfirmModalElements().forEach(modal => {
     const isMobileRuleHelp = isMobileViewport && modal.classList.contains('wbm-rule-help-modal');
+    const isMobileFullScreenModal =
+      isMobileViewport &&
+      (isMobileRuleHelp ||
+        modal.classList.contains('wbm-version-modal') ||
+        modal.classList.contains('wbm-optimizer-settings-modal'));
     modal.style.setProperty('position', 'absolute', 'important');
     modal.style.setProperty('top', `${viewportTop}px`, 'important');
     modal.style.setProperty('left', '0', 'important');
@@ -5004,11 +5009,11 @@ function syncModalViewport(): void {
     modal.style.setProperty('width', `${viewportWidth}px`, 'important');
     modal.style.setProperty('height', `${viewportHeight}px`, 'important');
     modal.style.setProperty('display', 'flex', 'important');
-    modal.style.setProperty('align-items', isMobileRuleHelp ? 'stretch' : 'center', 'important');
+    modal.style.setProperty('align-items', isMobileFullScreenModal ? 'stretch' : 'center', 'important');
     modal.style.setProperty('justify-content', 'center', 'important');
     modal.style.setProperty('box-sizing', 'border-box', 'important');
     modal.style.setProperty('z-index', '31400', 'important');
-    if (isMobileRuleHelp) {
+    if (isMobileFullScreenModal) {
       modal.style.setProperty('padding', '0', 'important');
     }
   });
@@ -8931,7 +8936,15 @@ select:disabled {
 }
 
 .wbm-version-box-header {
+  position: sticky;
+  top: -14px;
+  z-index: 2;
   justify-content: space-between;
+  margin: -14px -14px 0;
+  padding: 14px;
+  border-bottom: 1px solid var(--wbm-border-soft);
+  background: rgba(29, 29, 32, 0.96);
+  backdrop-filter: blur(14px);
 }
 
 .wbm-version-box-header p {
@@ -9969,8 +9982,27 @@ select:disabled {
 
   .wbm-version-box {
     width: 100%;
-    max-height: calc(var(--wbm-vvh, 100dvh) - 20px);
+    height: 100%;
+    max-height: none;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
     padding: 10px;
+    padding-top: calc(10px + env(safe-area-inset-top));
+    padding-right: calc(10px + env(safe-area-inset-right));
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+    padding-left: calc(10px + env(safe-area-inset-left));
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .wbm-version-box-header {
+    top: calc(-10px - env(safe-area-inset-top));
+    margin: calc(-10px - env(safe-area-inset-top)) calc(-10px - env(safe-area-inset-right)) 0
+      calc(-10px - env(safe-area-inset-left));
+    padding: calc(10px + env(safe-area-inset-top)) calc(10px + env(safe-area-inset-right)) 10px
+      calc(10px + env(safe-area-inset-left));
   }
 
   .wbm-version-summary {
@@ -10023,7 +10055,9 @@ select:disabled {
   }
 
   .wbm-version-list {
-    max-height: min(300px, calc(var(--wbm-vvh, 100dvh) - 460px));
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
   }
 
   .wbm-book-list {
