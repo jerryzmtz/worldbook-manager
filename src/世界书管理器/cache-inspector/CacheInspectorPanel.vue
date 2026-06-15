@@ -445,7 +445,8 @@ const CHART_BASELINE = 116;
 const CHART_LEFT = 12;
 const CHART_RIGHT = 308;
 const PENDING_RECORD_REFRESH_DELAY_MS = 500;
-const PANEL_TRACE_LIMIT = 300;
+const PANEL_TRACE_LIMIT = 160;
+const PANEL_TRACE_LIST_LIMIT = 20;
 
 type BarMark = {
   id: string;
@@ -765,6 +766,7 @@ async function refreshPendingRecordsFromStorage(): Promise<void> {
     const storedRecords = filterDisplayableRecords(await listCacheSummaries());
     const transitions = storedRecords
       .filter(record => beforePendingIds.has(record.id) && record.status !== 'pending')
+      .slice(0, PANEL_TRACE_LIST_LIMIT)
       .map(record => ({
         id: record.id,
         status: record.status,
@@ -831,7 +833,23 @@ function logPanelTrace(stage: string, details?: Record<string, unknown>): void {
   } catch {
     // 诊断日志不能影响面板本身。
   }
+  if (!isPanelTraceLoggingEnabled()) return;
   console.log(`[缓存命中对比][trace] ${stage}`, details ?? {});
+}
+
+function isPanelTraceLoggingEnabled(): boolean {
+  try {
+    const traceWindow = window as CacheInspectorTraceWindow & { __WBM_CACHE_INSPECTOR_DEBUG__?: boolean };
+    if (traceWindow.__WBM_CACHE_INSPECTOR_DEBUG__) return true;
+  } catch {
+    return false;
+  }
+
+  try {
+    return window.localStorage?.getItem('worldbookCacheInspectorDebug') === '1';
+  } catch {
+    return false;
+  }
 }
 
 function syncCacheModalViewport(): void {

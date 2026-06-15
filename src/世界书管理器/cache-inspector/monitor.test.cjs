@@ -1945,7 +1945,7 @@ test('polls TauriTavern native log index without subscription support', async ()
     assert.ok(indexCalls >= 1);
 
     exposeLog = true;
-    await wait(1300);
+    await wait(3300);
     await flushAsyncWork();
 
     assert.ok(indexCalls >= 2);

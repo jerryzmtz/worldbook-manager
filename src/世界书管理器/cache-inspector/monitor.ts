@@ -13,10 +13,14 @@ const TAURI_LOG_INDEX_POLL_LIMIT = 40;
 const TAURI_LOG_INDEX_MAX_RAW_READS_PER_POLL = 2;
 const TAURI_LOG_LOW_KEEP_WARNING_THRESHOLD = 20;
 const TAURI_LOG_INDEX_BUSY_POLL_INTERVAL_MS = 500;
-const TAURI_LOG_INDEX_IDLE_POLL_INTERVAL_MS = 1000;
+const TAURI_LOG_INDEX_IDLE_POLL_INTERVAL_MS = 3_000;
 const TAURI_LOG_INDEX_HISTORY_GRACE_MS = 5_000;
 const MONITOR_WATCHDOG_INTERVAL_MS = 500;
-const CACHE_INSPECTOR_TRACE_LIMIT = 300;
+const CACHE_INSPECTOR_TRACE_LIMIT = 160;
+const CACHE_INSPECTOR_TRACE_STRING_LIMIT = 240;
+const CACHE_INSPECTOR_TRACE_ARRAY_LIMIT = 20;
+const CACHE_INSPECTOR_TRACE_OBJECT_KEY_LIMIT = 30;
+const CACHE_INSPECTOR_TRACE_MAX_DEPTH = 3;
 const HOST_FUNCTION_CAPTURE_STORAGE_KEY = 'worldbookCacheInspectorHostFunctionCapture';
 const NO_CACHE_USAGE_MESSAGE = '无缓存明细';
 const LEGACY_NO_CACHE_USAGE_MESSAGE = '未返回缓存数据';
@@ -877,11 +881,13 @@ function pollTauriNativeLogIndexIfNeeded(
   const pollInterval = hasPollingWork ? TAURI_LOG_INDEX_BUSY_POLL_INTERVAL_MS : TAURI_LOG_INDEX_IDLE_POLL_INTERVAL_MS;
   if (now - lastPolledAt < pollInterval) return;
   runtime.tauriLogIndexPollTimes.set(llmApiLogs, now);
-  traceCacheInspector(targetWindow, 'tt.log.index.poll.schedule', {
-    intervalMs: pollInterval,
-    hasPollingWork,
-    ...tauriRuntimeTraceDetails(runtime),
-  });
+  if (hasPollingWork || isDiagnosticLoggingEnabled(targetWindow)) {
+    traceCacheInspector(targetWindow, 'tt.log.index.poll.schedule', {
+      intervalMs: pollInterval,
+      hasPollingWork,
+      ...tauriRuntimeTraceDetails(runtime),
+    });
+  }
   void pollTauriNativeLogIndex(runtime, targetWindow, llmApiLogs);
 }
 
@@ -902,12 +908,14 @@ async function pollTauriNativeLogIndex(
     const entries = await llmApiLogs.index({
       limit: hasPollingWork || shouldRecoverStoredRecords ? TAURI_LOG_INDEX_POLL_LIMIT : 20,
     });
-    traceCacheInspector(targetWindow, 'tt.log.index.poll.result', {
-      count: entries.length,
-      ids: entries.map(entry => entry.id).filter(id => typeof id === 'number').slice(0, 20),
-      storedClaimCandidates: storedClaimCandidates.length,
-      ...tauriRuntimeTraceDetails(runtime),
-    });
+    if (entries.length > 0 || shouldRecoverStoredRecords || hasPollingWork || isDiagnosticLoggingEnabled(targetWindow)) {
+      traceCacheInspector(targetWindow, 'tt.log.index.poll.result', {
+        count: entries.length,
+        ids: entries.map(entry => entry.id).filter(id => typeof id === 'number').slice(0, 20),
+        storedClaimCandidates: storedClaimCandidates.length,
+        ...tauriRuntimeTraceDetails(runtime),
+      });
+    }
     let rawReadsScheduled = 0;
     for (const entry of entries) {
       if (!shouldProcessTauriLogIndexEntry(runtime, targetWindow, entry, hasPollingWork, storedClaimCandidates)) {
@@ -2873,6 +2881,7 @@ function traceCacheInspector(
   pushTraceEntry(globalWindow, entry);
   if (targetWindow && targetWindow !== globalWindow) pushTraceEntry(targetWindow, entry);
 
+  if (!isDiagnosticLoggingEnabled(targetWindow) && !isDiagnosticLoggingEnabled(globalWindow)) return;
   const consoleLike = globalThis.console;
   const method = consoleLike?.log;
   if (typeof method !== 'function') return;
@@ -2894,11 +2903,50 @@ function pushTraceEntry(targetWindow: MonitorWindow | null, entry: CacheInspecto
 
 function sanitizeTraceDetails(details?: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!details) return undefined;
-  try {
-    return JSON.parse(JSON.stringify(details)) as Record<string, unknown>;
-  } catch {
-    return { note: 'trace details could not be serialized' };
+  const sanitized = sanitizeTraceValue(details, 0);
+  return isRecord(sanitized) ? sanitized : { value: sanitized };
+}
+
+function sanitizeTraceValue(value: unknown, depth: number): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') return truncateTraceString(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value === 'symbol' || typeof value === 'function') return traceValueSummary(value);
+  if (value instanceof Error) return { name: value.name, message: truncateTraceString(value.message) };
+  if (depth >= CACHE_INSPECTOR_TRACE_MAX_DEPTH) return traceValueSummary(value);
+
+  if (Array.isArray(value)) {
+    const items = value
+      .slice(0, CACHE_INSPECTOR_TRACE_ARRAY_LIMIT)
+      .map(item => sanitizeTraceValue(item, depth + 1));
+    if (value.length > CACHE_INSPECTOR_TRACE_ARRAY_LIMIT) {
+      items.push(`...${value.length - CACHE_INSPECTOR_TRACE_ARRAY_LIMIT} more items`);
+    }
+    return items;
   }
+
+  if (!isRecord(value)) return traceValueSummary(value);
+
+  const entries = Object.entries(value).slice(0, CACHE_INSPECTOR_TRACE_OBJECT_KEY_LIMIT);
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of entries) {
+    result[key] = sanitizeTraceValue(item, depth + 1);
+  }
+  const omittedKeyCount = Object.keys(value).length - entries.length;
+  if (omittedKeyCount > 0) result.__omittedKeys = omittedKeyCount;
+  return result;
+}
+
+function truncateTraceString(value: string): string {
+  if (value.length <= CACHE_INSPECTOR_TRACE_STRING_LIMIT) return value;
+  return `${value.slice(0, CACHE_INSPECTOR_TRACE_STRING_LIMIT)}...(${value.length} chars)`;
+}
+
+function traceValueSummary(value: unknown): string {
+  if (Array.isArray(value)) return `[Array(${value.length})]`;
+  if (value && typeof value === 'object') return `[${value.constructor?.name || 'Object'}]`;
+  return String(value);
 }
 
 function tauriRuntimeTraceDetails(runtime: CacheInspectorMonitorRuntime): Record<string, unknown> {
