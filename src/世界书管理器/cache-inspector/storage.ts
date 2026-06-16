@@ -1,4 +1,11 @@
-import type { CacheRecord, CacheSummaryRecord, PromptSnapshotRecord } from './types';
+import { createTextHash } from './diff';
+import type {
+  CacheRecord,
+  CacheRecordStatus,
+  CacheSummaryRecord,
+  PromptMessageSnapshot,
+  PromptSnapshotRecord,
+} from './types';
 
 const DB_NAME = 'WorldbookCacheInspectorDB';
 const DB_VERSION = 2;
@@ -50,11 +57,20 @@ function migrateLegacyRecords(
 ): void {
   const request = legacyStore.getAll();
   request.onsuccess = () => {
-    const legacyRecords = (request.result as CacheRecord[]).sort((left, right) => right.timestamp - left.timestamp);
+    const legacyRecords = toArray(request.result)
+      .map(normalizeLegacyRecord)
+      .filter((record): record is CacheRecord => !!record)
+      .sort((left, right) => right.timestamp - left.timestamp);
+    let retainedSnapshotBytes = 0;
     legacyRecords.forEach((record, index) => {
-      const snapshotAvailable = index < MAX_PROMPT_SNAPSHOTS && record.messages.length > 0;
+      const snapshotBytes = estimatePromptSnapshotBytes(record);
+      const snapshotAvailable =
+        index < MAX_PROMPT_SNAPSHOTS &&
+        record.messages.length > 0 &&
+        retainedSnapshotBytes + snapshotBytes <= MAX_PROMPT_SNAPSHOT_BYTES;
       summaryStore.put(legacyRecordToSummary(record, snapshotAvailable));
       if (snapshotAvailable) {
+        retainedSnapshotBytes += snapshotBytes;
         snapshotStore.put({
           id: record.id,
           timestamp: record.timestamp,
@@ -65,14 +81,51 @@ function migrateLegacyRecords(
   };
 }
 
+function normalizeLegacyRecord(value: unknown): CacheRecord | null {
+  if (!isRecord(value)) return null;
+  const id = normalizeId(value.id);
+  if (!id) return null;
+
+  const messages = normalizeLegacyMessages(value.messages);
+  const promptChars = messages.reduce((sum, message) => sum + message.length, 0);
+  const hitTokens = normalizeNumber(value.hitTokens, 0);
+  const missTokens = normalizeNumber(value.missTokens, 0);
+  const totalCacheTokens = normalizeNumber(value.totalCacheTokens, hitTokens + missTokens);
+  const outputTokens = normalizeNumber(value.outputTokens, 0);
+  const totalTokens = normalizeNumber(value.totalTokens, totalCacheTokens);
+
+  return {
+    id,
+    timestamp: normalizeNumber(value.timestamp, 0),
+    status: normalizeStatus(value.status),
+    model: normalizeString(value.model, '当前模型'),
+    messageCount: messages.length > 0 ? messages.length : normalizeNumber(value.messageCount, 0),
+    promptChars: promptChars > 0 ? promptChars : normalizeNumber(value.promptChars, 0),
+    snapshotAvailable: messages.length > 0,
+    messages,
+    hitTokens,
+    missTokens,
+    totalCacheTokens,
+    hitRate: normalizeNullableNumber(value.hitRate),
+    outputTokens,
+    totalTokens,
+    rawUsage: isRecord(value.rawUsage) ? value.rawUsage : null,
+    pricingSnapshot: isRecord(value.pricingSnapshot)
+      ? (value.pricingSnapshot as CacheSummaryRecord['pricingSnapshot'])
+      : null,
+    costSnapshot: isRecord(value.costSnapshot) ? (value.costSnapshot as CacheSummaryRecord['costSnapshot']) : null,
+    errorMessage: typeof value.errorMessage === 'string' ? value.errorMessage : null,
+  };
+}
+
 function legacyRecordToSummary(record: CacheRecord, snapshotAvailable: boolean): CacheSummaryRecord {
   return {
     id: record.id,
     timestamp: record.timestamp,
     status: record.status,
     model: record.model,
-    messageCount: record.messages.length,
-    promptChars: record.messages.reduce((sum, message) => sum + message.length, 0),
+    messageCount: record.messageCount,
+    promptChars: record.promptChars,
     snapshotAvailable,
     hitTokens: record.hitTokens,
     missTokens: record.missTokens,
@@ -85,6 +138,63 @@ function legacyRecordToSummary(record: CacheRecord, snapshotAvailable: boolean):
     costSnapshot: record.costSnapshot ?? null,
     errorMessage: record.errorMessage,
   };
+}
+
+function normalizeLegacyMessages(value: unknown): PromptMessageSnapshot[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(normalizeLegacyMessage).filter((message): message is PromptMessageSnapshot => !!message);
+}
+
+function normalizeLegacyMessage(value: unknown): PromptMessageSnapshot | null {
+  if (typeof value === 'string') return createPromptSnapshot('unknown', value);
+  if (!isRecord(value)) return null;
+  const text = normalizeString(value.text, normalizeString(value.content, ''));
+  if (!text) return null;
+  return {
+    role: normalizeString(value.role, 'unknown'),
+    text,
+    length: normalizeNumber(value.length, text.length),
+    hash: normalizeString(value.hash, createTextHash(text)),
+  };
+}
+
+function createPromptSnapshot(role: string, text: string): PromptMessageSnapshot {
+  return {
+    role,
+    text,
+    length: text.length,
+    hash: createTextHash(text),
+  };
+}
+
+function normalizeId(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+function normalizeStatus(value: unknown): CacheRecordStatus {
+  return value === 'pending' || value === 'completed' || value === 'failed' ? value : 'completed';
+}
+
+function normalizeString(value: unknown, fallback: string): string {
+  return typeof value === 'string' ? value : fallback;
+}
+
+function normalizeNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : fallback;
+}
+
+function normalizeNullableNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function toArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 function requestToPromise<T>(request: IDBRequest<T>, failureMessage: string): Promise<T> {
@@ -316,7 +426,10 @@ async function deleteSummariesAndSnapshots(ids: string[]): Promise<void> {
 }
 
 function estimatePromptSnapshotBytes(snapshot: PromptSnapshotRecord): number {
-  return snapshot.messages.reduce((sum, message) => {
-    return sum + 512 + message.role.length * 2 + message.hash.length * 2 + message.text.length * 4;
-  }, 512 + snapshot.id.length * 2);
+  return snapshot.messages.reduce(
+    (sum, message) => {
+      return sum + 512 + message.role.length * 2 + message.hash.length * 2 + message.text.length * 4;
+    },
+    512 + snapshot.id.length * 2,
+  );
 }
