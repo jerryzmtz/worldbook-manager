@@ -10,7 +10,9 @@ require('ts-node/register/transpile-only');
 const { createBlueEntryMergePlan } = require('./blue-entry-merge.ts');
 const {
   getMvuMergeGuardReason,
+  getMvuMergeSignals,
   isMvuMergeProtectedEntry,
+  shouldSkipBlueMergeForMvuProtocol,
 } = require('./mvu-merge-guard.ts');
 
 test('merges adjacent safe blue entries inside one worldbook with native newline boundary', () => {
@@ -129,6 +131,30 @@ test('assigns min source uid when one book has multiple merge groups', () => {
   );
 });
 
+test('getMvuMergeSignals separates protocol from runtime body detection', () => {
+  const protocolOnly = getMvuMergeSignals({
+    name: '[mvu_update]',
+    content: '变量更新规则:\n  世界.当前时间: 每次推进后更新',
+  });
+  assert.deepEqual(protocolOnly, { protocol: 'mvu_routing_comment', runtimeBody: false, tavernMacro: false });
+  assert.equal(
+    shouldSkipBlueMergeForMvuProtocol({
+      name: '[mvu_update]',
+      content: '变量更新规则:\n  世界.当前时间: 每次推进后更新',
+    }),
+    true,
+  );
+
+  const runtimeOnly = getMvuMergeSignals({
+    name: '变量列表',
+    content: '---\n<status_current_variables>\n{{format_message_variable::stat_data}}\n</status_current_variables>',
+  });
+  assert.equal(runtimeOnly.protocol, null);
+  assert.equal(runtimeOnly.runtimeBody, true);
+  assert.equal(runtimeOnly.tavernMacro, true);
+  assert.equal(shouldSkipBlueMergeForMvuProtocol({ name: '变量列表', content: runtimeOnly.content }), false);
+});
+
 test('mvu guard mirrors MagVarUpdate routing tags on entry name, not lore body', () => {
   assert.equal(
     getMvuMergeGuardReason({
@@ -197,6 +223,31 @@ test('skips already-merged blocks whose merge-source header still lists mvu prot
 
   assert.equal(plan.groups.length, 0);
   assert.equal(getMvuMergeGuardReason(merged), 'mvu_protocol_in_merge_header');
+});
+
+test('runtime-body signals block merge only when detectRisks is provided', () => {
+  const entries = [
+    baseEntry({
+      uid: 228,
+      name: '变量列表',
+      content: '---\n<status_current_variables>\n{{format_message_variable::stat_data}}\n</status_current_variables>',
+    }),
+    baseEntry({ uid: 99, content: 'safe' }),
+  ];
+
+  const withoutRisks = createBlueEntryMergePlan([{ name: 'Book A', entries }]);
+  assert.equal(withoutRisks.groups.length, 1);
+
+  const withRisks = createBlueEntryMergePlan([{ name: 'Book A', entries }], {
+    detectRisks: entry => {
+      const signals = getMvuMergeSignals({ name: entry.name, content: entry.content });
+      const risks = [];
+      if (signals.runtimeBody) risks.push({ level: 'dynamic' });
+      if (signals.tavernMacro) risks.push({ level: 'dynamic' });
+      return risks;
+    },
+  });
+  assert.equal(withRisks.groups.length, 0);
 });
 
 test('still allows generic blue merge when only the body mentions stat_data', () => {

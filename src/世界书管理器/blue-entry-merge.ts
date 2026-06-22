@@ -1,9 +1,15 @@
-import { isMvuMergeProtectedEntry } from './mvu-merge-guard';
+import { shouldSkipBlueMergeForMvuProtocol } from './mvu-merge-guard';
 
 export {
   getMvuMergeGuardReason,
+  getMvuMergeSignals,
+  getMvuProtocolRiskLabel,
   isMvuMergeProtectedEntry,
+  shouldSkipBlueMergeForMvuProtocol,
+  MVU_RUNTIME_BODY_PATTERN,
+  TAVERN_VARIABLE_MACRO_PATTERN,
   type MvuMergeGuardReason,
+  type MvuMergeSignals,
 } from './mvu-merge-guard';
 
 export type MergeEntryPositionType =
@@ -268,7 +274,7 @@ function isMergeCandidate<T extends MergeEntry>(
   entry: T,
   detectRisks: CreateBlueEntryMergePlanOptions<T>['detectRisks'],
 ): boolean {
-  if (isMvuMergeProtectedEntry(entry)) return false;
+  if (shouldSkipBlueMergeForMvuProtocol(entry)) return false;
   if (!entry.enabled || entry.strategy.type !== 'constant') return false;
   if (entry.probability !== 100 || entry.ignoreBudget) return false;
   if (!entry.content || hasDecoratorDirective(entry.content)) return false;

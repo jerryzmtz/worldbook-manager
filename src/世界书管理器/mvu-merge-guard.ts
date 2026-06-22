@@ -1,16 +1,17 @@
 /**
- * Skip blue-entry merge for worldbook entries that MVU already classifies by
- * entry name/comment (and initvar markers), not by arbitrary lore body text.
+ * MVU-related merge guards for worldbook-manager.
  *
- * Rationale: MVU's story/variable split filters lore with
- *   /\[mvu_update\]/i and /\[mvu_plot\]/i on entry.comment (MagVarUpdate).
- * Merging rewrites comment to "合并蓝灯：…", so a formerly tagged entry would be
- * injected into both AIs instead of following MVU routing.
+ * Two layers (complementary, not duplicate):
+ * 1. Protocol — entry name / initvar markers that MagVarUpdate uses to route lore
+ *    between story AI and variable-update AI. Hard-blocked in blue merge.
+ * 2. Runtime body — stat_data / tavern variable macros in lore text. Surfaced as
+ *    preview risks and blocked via detectEntryRisks() like before this module.
  *
- * We mirror MVU's own discovery rules instead of guessing future YAML/JSON bodies.
+ * Plugin internal field `entry.name` is SillyTavern worldbook `comment` (备注名).
  */
 
 export type MvuMergeGuardEntry = {
+  /** ST worldbook comment / 备注名 */
   name?: string;
   content?: string;
 };
@@ -24,12 +25,25 @@ export const MVU_INITVAR_COMMENT_MARKER = '[initvar]';
 /** MagVarUpdate init scan: <initvar> block in content. */
 export const MVU_INITVAR_CONTENT_OPEN = /<initvar[\s>]/i;
 
+/** Former detectEntryRisks "MVU变量" body heuristic. */
+export const MVU_RUNTIME_BODY_PATTERN = /stat_data|Mvu|mvu/;
+
+/** Former detectEntryRisks tavern-helper variable macro heuristic. */
+export const TAVERN_VARIABLE_MACRO_PATTERN =
+  /\{\{(?:(?:get|format)_(?:global|preset|character|chat|message)_variable|format_(?:global|preset|character|chat|message)_message)::/i;
+
 const MERGE_SOURCE_HEADER = /^\s*\{\{\/\/\s*合并来源：/;
 
 export type MvuMergeGuardReason =
   | 'mvu_routing_comment'
   | 'mvu_initvar'
   | 'mvu_protocol_in_merge_header';
+
+export type MvuMergeSignals = {
+  protocol: MvuMergeGuardReason | null;
+  runtimeBody: boolean;
+  tavernMacro: boolean;
+};
 
 export function getMvuMergeGuardReason(entry: MvuMergeGuardEntry): MvuMergeGuardReason | null {
   const name = entry.name ?? '';
@@ -55,6 +69,32 @@ export function getMvuMergeGuardReason(entry: MvuMergeGuardEntry): MvuMergeGuard
   return null;
 }
 
+/** Protocol-only guard (MagVarUpdate comment/initvar classification). */
 export function isMvuMergeProtectedEntry(entry: MvuMergeGuardEntry): boolean {
   return getMvuMergeGuardReason(entry) !== null;
+}
+
+export function getMvuMergeSignals(entry: MvuMergeGuardEntry): MvuMergeSignals {
+  const content = entry.content ?? '';
+  return {
+    protocol: getMvuMergeGuardReason(entry),
+    runtimeBody: MVU_RUNTIME_BODY_PATTERN.test(content),
+    tavernMacro: TAVERN_VARIABLE_MACRO_PATTERN.test(content),
+  };
+}
+
+/** Hard block for blue merge — protocol layer only. */
+export function shouldSkipBlueMergeForMvuProtocol(entry: MvuMergeGuardEntry): boolean {
+  return isMvuMergeProtectedEntry(entry);
+}
+
+export function getMvuProtocolRiskLabel(reason: MvuMergeGuardReason): string {
+  switch (reason) {
+    case 'mvu_routing_comment':
+      return 'MVU分流备注';
+    case 'mvu_initvar':
+      return 'MVU初始化';
+    case 'mvu_protocol_in_merge_header':
+      return '合并来源含MVU协议名';
+  }
 }
