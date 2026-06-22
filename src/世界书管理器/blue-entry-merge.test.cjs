@@ -21,9 +21,9 @@ test('merges adjacent safe blue entries inside one worldbook with native newline
   assert.deepEqual(group.sourceUids, [1, 2]);
   assert.equal(group.content, '{{// 合并来源：A；B}}\nAlpha\nBeta');
   assert.equal(group.mergedEntry.content, '{{// 合并来源：A；B}}\nAlpha\nBeta');
-  assert.equal(group.mergedEntry.uid, 3);
+  assert.equal(group.mergedEntry.uid, 1);
   assert.equal(bookPlan.entries.length, 1);
-  assert.equal(bookPlan.entries[0].uid, 3);
+  assert.equal(bookPlan.entries[0].uid, 1);
   assert.equal(bookPlan.removedCount, 2);
   assert.equal(bookPlan.addedCount, 1);
 });
@@ -77,11 +77,35 @@ test('does not merge across unsafe or non-blue entries in the prompt order', () 
   assert.deepEqual(plan.groups[0].sourceUids, [3, 4]);
   assert.deepEqual(
     plan.books[0].entries.map(entry => entry.uid),
-    [1, 2, 5],
+    [1, 2, 3],
   );
 });
 
-test('assigns stable unique UIDs when one book has multiple merge groups', () => {
+test('reuses min source uid per merge group to preserve uid-sorted order', () => {
+  const entries = [
+    baseEntry({ uid: 2, name: 'First', content: 'First', position: position({ order: 100 }) }),
+    baseEntry({ uid: 3, name: 'Second', content: 'Second', position: position({ order: 100 }) }),
+    baseEntry({
+      uid: 54,
+      name: 'Middle',
+      content: 'Middle',
+      strategyType: 'selective',
+      position: position({ order: 100 }),
+    }),
+    baseEntry({ uid: 55, name: 'Tail 1', content: 'Tail 1', position: position({ order: 100 }) }),
+    baseEntry({ uid: 56, name: 'Tail 2', content: 'Tail 2', position: position({ order: 100 }) }),
+  ];
+
+  const plan = createBlueEntryMergePlan([{ name: 'Book A', entries }]);
+
+  assert.deepEqual(plan.groups.map(group => group.mergedEntry.uid), [2, 55]);
+  assert.deepEqual(
+    plan.books[0].entries.map(entry => entry.uid),
+    [2, 54, 55],
+  );
+});
+
+test('assigns min source uid when one book has multiple merge groups', () => {
   const entries = [
     baseEntry({ uid: 2, content: 'before 1', position: position({ type: 'before_character_definition', order: 10 }) }),
     baseEntry({ uid: 4, content: 'before 2', position: position({ type: 'before_character_definition', order: 20 }) }),
@@ -93,11 +117,11 @@ test('assigns stable unique UIDs when one book has multiple merge groups', () =>
 
   assert.deepEqual(
     plan.groups.map(group => group.mergedEntry.uid),
-    [9, 10],
+    [2, 6],
   );
   assert.deepEqual(
     plan.books[0].entries.map(entry => entry.uid),
-    [9, 10],
+    [2, 6],
   );
 });
 
