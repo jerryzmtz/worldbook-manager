@@ -181,8 +181,12 @@ function createBlueEntryMergeBookPlan<T extends MergeEntry>(
 
   flush();
 
-  let nextUid = book.entries.reduce((max, entry) => Math.max(max, entry.uid), -1) + 1;
-  const groups = groupItems.map(items => createMergeGroup(book.name, items, nextUid++, options));
+  // Reuse the smallest source uid so SillyTavern's uid tie-break keeps merged blocks
+  // in the same relative slot when entries share the same order value.
+  const groups = groupItems.map(items => {
+    const minUid = Math.min(...items.map(item => item.entry.uid));
+    return createMergeGroup(book.name, items, minUid, options);
+  });
   const entries = applyMergeGroups(book.entries, groups);
   return {
     worldbook: book.name,
