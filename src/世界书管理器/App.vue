@@ -1598,7 +1598,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import CacheInspectorPanel from './cache-inspector/CacheInspectorPanel.vue';
-import { createBlueEntryMergePlan, isMvuProtectedEntry, type MergeGroup } from './blue-entry-merge';
+import { createBlueEntryMergePlan, getMvuMergeGuardReason, isMvuMergeProtectedEntry, type MergeGroup } from './blue-entry-merge';
 import {
   DuplicateWorldbookPlanAbortError,
   createDuplicateWorldbookFingerprintSignature,
@@ -6789,15 +6789,17 @@ function detectEntryRisks(entry: WorldbookEntry): RiskHit[] {
       extractPatternExcerpt(text, /\b(?:getvar|setvar|addvar|incvar|decvar|hasvar|deletevar)\s*\(/i),
     );
   }
-  if (isMvuProtectedEntry({ name: entry.name, content: text })) {
-    addRisk(
-      'MVU条目',
-      'dynamic',
-      entry.name ||
-        extractPatternExcerpt(text, /<\/?initvar\b|<\/?UpdateVariable\b|<\/?JSONPatch\b|stat_data|Mvu|mvu/i) ||
-        'MVU',
-    );
+  if (isMvuMergeProtectedEntry({ name: entry.name, content: text })) {
+    const reason = getMvuMergeGuardReason({ name: entry.name, content: text });
+    const label =
+      reason === 'mvu_routing_comment'
+        ? 'MVU分流条目'
+        : reason === 'mvu_initvar'
+          ? 'MVU初始化条目'
+          : 'MVU协议条目';
+    addRisk('MVU条目', 'dynamic', entry.name || label);
   }
+  if (/stat_data|Mvu|mvu/.test(text)) addRisk('MVU变量', 'dynamic', extractPatternExcerpt(text, /stat_data|Mvu|mvu/));
   if (
     /\{\{(?:(?:get|format)_(?:global|preset|character|chat|message)_variable|format_(?:global|preset|character|chat|message)_message)::/i.test(
       text,

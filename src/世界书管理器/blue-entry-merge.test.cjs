@@ -8,6 +8,10 @@ process.env.TS_NODE_COMPILER_OPTIONS = JSON.stringify({
 require('ts-node/register/transpile-only');
 
 const { createBlueEntryMergePlan } = require('./blue-entry-merge.ts');
+const {
+  getMvuMergeGuardReason,
+  isMvuMergeProtectedEntry,
+} = require('./mvu-merge-guard.ts');
 
 test('merges adjacent safe blue entries inside one worldbook with native newline boundary', () => {
   const entries = [baseEntry({ uid: 1, name: 'A', content: 'Alpha' }), baseEntry({ uid: 2, name: 'B', content: 'Beta' })];
@@ -125,7 +129,25 @@ test('assigns min source uid when one book has multiple merge groups', () => {
   );
 });
 
-test('skips mvu-tagged entries even when content has no mvu keywords', () => {
+test('mvu guard mirrors MagVarUpdate routing tags on entry name, not lore body', () => {
+  assert.equal(
+    getMvuMergeGuardReason({
+      name: '[mvu_update]',
+      content: '变量更新规则:\n  _强制更新提醒:\n    - 以下变量每次回复必须更新',
+    }),
+    'mvu_routing_comment',
+  );
+  assert.equal(getMvuMergeGuardReason({ name: '防全知', content: 'plain lore' }), null);
+  assert.equal(
+    getMvuMergeGuardReason({
+      name: '格式说明',
+      content: '<UpdateVariable>\n<JSONPatch>[]</JSONPatch>\n</UpdateVariable>',
+    }),
+    null,
+  );
+});
+
+test('skips mvu routing-tagged entries even when lore body has no mvu keywords', () => {
   const mvuRules = baseEntry({
     uid: 227,
     name: '[mvu_update]',
@@ -142,27 +164,53 @@ test('skips mvu-tagged entries even when content has no mvu keywords', () => {
   );
 });
 
-test('skips initvar and mvu output format entries by comment tag', () => {
-  for (const name of ['[initvar] 初始', '[mvu_update]变量输出格式', '[mvu_plot]剧情补充']) {
-    const plan = createBlueEntryMergePlan(
-      [{ name: 'Book A', entries: [baseEntry({ uid: 1, name, content: 'plain lore' }), baseEntry({ uid: 2, content: 'safe' })] }],
-    );
-    assert.equal(plan.groups.length, 0, `unexpected merge involving ${name}`);
-  }
-});
+test('skips initvar protocol entries by comment or initvar block', () => {
+  assert.equal(isMvuMergeProtectedEntry({ name: '[initvar] 初始', content: '世界:\n  当前时间: 未知' }), true);
+  assert.equal(
+    isMvuMergeProtectedEntry({ name: '变量初始化', content: '<initvar>\n世界:\n  当前时间: 未知\n</initvar>' }),
+    true,
+  );
 
-test('skips entries whose content contains mvu structure tags', () => {
   const plan = createBlueEntryMergePlan([
     {
       name: 'Book A',
       entries: [
-        baseEntry({ uid: 1, content: '<UpdateVariable>\n<JSONPatch>[]</JSONPatch>\n</UpdateVariable>' }),
+        baseEntry({ uid: 1, name: '[initvar] 初始', content: '世界:\n  当前时间: 未知' }),
         baseEntry({ uid: 2, content: 'safe' }),
       ],
     },
   ]);
+  assert.equal(plan.groups.length, 0);
+});
+
+test('skips already-merged blocks whose merge-source header still lists mvu protocol names', () => {
+  const merged = baseEntry({
+    uid: 9,
+    name: '合并蓝灯：防全知 等 10 条',
+    content:
+      '{{// 合并来源：防全知；具体数值；[mvu_update]}}\n防全知正文\n具体数值正文',
+  });
+
+  const plan = createBlueEntryMergePlan([
+    { name: 'Book A', entries: [merged, baseEntry({ uid: 99, content: 'safe' })] },
+  ]);
 
   assert.equal(plan.groups.length, 0);
+  assert.equal(getMvuMergeGuardReason(merged), 'mvu_protocol_in_merge_header');
+});
+
+test('still allows generic blue merge when only the body mentions stat_data', () => {
+  const plan = createBlueEntryMergePlan([
+    {
+      name: 'Book A',
+      entries: [
+        baseEntry({ uid: 1, name: '设定说明', content: 'stat_data 由 MVU 脚本维护，本条只是说明文字' }),
+        baseEntry({ uid: 2, name: '另一段设定', content: 'safe' }),
+      ],
+    },
+  ]);
+
+  assert.equal(plan.groups.length, 1);
 });
 
 test('skips cases that could change original worldbook behavior', () => {
