@@ -123,6 +123,22 @@ const MERGEABLE_POSITION_TYPES = new Set<MergeEntryPositionType>([
   'at_depth',
 ]);
 
+const MVU_COMMENT_PATTERN = /\[(?:mvu_update|mvu_plot|initvar)\]/i;
+const MVU_CONTENT_TAG_PATTERN = /<\/?initvar\b|<\/?UpdateVariable\b|<\/?JSONPatch\b/i;
+const MVU_CONTENT_HINT_PATTERN = /stat_data|Mvu|mvu/;
+
+/** MVU routes lore by entry comment tags; merging these entries changes which AI receives them. */
+export function isMvuProtectedEntry(entry: Pick<MergeEntry, 'name' | 'content'>): boolean {
+  const name = entry.name ?? '';
+  if (MVU_COMMENT_PATTERN.test(name)) return true;
+
+  const text = entry.content ?? '';
+  if (MVU_CONTENT_TAG_PATTERN.test(text)) return true;
+  if (MVU_CONTENT_HINT_PATTERN.test(text)) return true;
+
+  return false;
+}
+
 export function createBlueEntryMergePlan<T extends MergeEntry>(
   books: MergeBook<T>[],
   options: CreateBlueEntryMergePlanOptions<T> = {},
@@ -260,6 +276,7 @@ function isMergeCandidate<T extends MergeEntry>(
   entry: T,
   detectRisks: CreateBlueEntryMergePlanOptions<T>['detectRisks'],
 ): boolean {
+  if (isMvuProtectedEntry(entry)) return false;
   if (!entry.enabled || entry.strategy.type !== 'constant') return false;
   if (entry.probability !== 100 || entry.ignoreBudget) return false;
   if (!entry.content || hasDecoratorDirective(entry.content)) return false;

@@ -125,6 +125,46 @@ test('assigns min source uid when one book has multiple merge groups', () => {
   );
 });
 
+test('skips mvu-tagged entries even when content has no mvu keywords', () => {
+  const mvuRules = baseEntry({
+    uid: 227,
+    name: '[mvu_update]',
+    content: '变量更新规则:\n  _强制更新提醒:\n    - 以下变量每次回复必须更新，不得遗漏:',
+  });
+  const antiMeta = baseEntry({ uid: 172, name: '防全知', content: '系统指令：NPC认知限制规则' });
+
+  const plan = createBlueEntryMergePlan([{ name: 'Book A', entries: [antiMeta, mvuRules] }]);
+
+  assert.equal(plan.groups.length, 0);
+  assert.deepEqual(
+    plan.books[0].entries.map(entry => entry.uid),
+    [172, 227],
+  );
+});
+
+test('skips initvar and mvu output format entries by comment tag', () => {
+  for (const name of ['[initvar] 初始', '[mvu_update]变量输出格式', '[mvu_plot]剧情补充']) {
+    const plan = createBlueEntryMergePlan(
+      [{ name: 'Book A', entries: [baseEntry({ uid: 1, name, content: 'plain lore' }), baseEntry({ uid: 2, content: 'safe' })] }],
+    );
+    assert.equal(plan.groups.length, 0, `unexpected merge involving ${name}`);
+  }
+});
+
+test('skips entries whose content contains mvu structure tags', () => {
+  const plan = createBlueEntryMergePlan([
+    {
+      name: 'Book A',
+      entries: [
+        baseEntry({ uid: 1, content: '<UpdateVariable>\n<JSONPatch>[]</JSONPatch>\n</UpdateVariable>' }),
+        baseEntry({ uid: 2, content: 'safe' }),
+      ],
+    },
+  ]);
+
+  assert.equal(plan.groups.length, 0);
+});
+
 test('skips cases that could change original worldbook behavior', () => {
   const unsafeEntries = [
     baseEntry({ uid: 2, ignoreBudget: true }),
