@@ -1652,7 +1652,7 @@ import {
   type VersionRelation,
 } from './version-manager';
 
-const APP_VERSION = 'v4.05';
+const APP_VERSION = 'v4.06';
 const EMPTY_VERSION_CATALOG: VersionCatalog = {
   latestVersion: null,
   versions: [],
