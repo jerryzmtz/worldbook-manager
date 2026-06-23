@@ -1598,7 +1598,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import CacheInspectorPanel from './cache-inspector/CacheInspectorPanel.vue';
-import { createBlueEntryMergePlan, type MergeGroup } from './blue-entry-merge';
+import {
+  createBlueEntryMergePlan,
+  getMvuMergeSignals,
+  getMvuProtocolRiskLabel,
+  MVU_RUNTIME_BODY_PATTERN,
+  TAVERN_VARIABLE_MACRO_PATTERN,
+  type MergeGroup,
+} from './blue-entry-merge';
 import {
   DuplicateWorldbookPlanAbortError,
   createDuplicateWorldbookFingerprintSignature,
@@ -6789,19 +6796,18 @@ function detectEntryRisks(entry: WorldbookEntry): RiskHit[] {
       extractPatternExcerpt(text, /\b(?:getvar|setvar|addvar|incvar|decvar|hasvar|deletevar)\s*\(/i),
     );
   }
-  if (/stat_data|Mvu|mvu/.test(text)) addRisk('MVU变量', 'dynamic', extractPatternExcerpt(text, /stat_data|Mvu|mvu/));
-  if (
-    /\{\{(?:(?:get|format)_(?:global|preset|character|chat|message)_variable|format_(?:global|preset|character|chat|message)_message)::/i.test(
-      text,
-    )
-  ) {
+  const mvuSignals = getMvuMergeSignals({ name: entry.name, content: text });
+  if (mvuSignals.protocol) {
+    addRisk('MVU协议分流', 'dynamic', entry.name || getMvuProtocolRiskLabel(mvuSignals.protocol));
+  }
+  if (mvuSignals.runtimeBody) {
+    addRisk('MVU运行时正文', 'dynamic', extractPatternExcerpt(text, MVU_RUNTIME_BODY_PATTERN));
+  }
+  if (mvuSignals.tavernMacro) {
     addRisk(
       '酒馆助手变量',
       'dynamic',
-      extractPatternExcerpt(
-        text,
-        /\{\{(?:(?:get|format)_(?:global|preset|character|chat|message)_variable|format_(?:global|preset|character|chat|message)_message)::/i,
-      ),
+      extractPatternExcerpt(text, TAVERN_VARIABLE_MACRO_PATTERN),
     );
   }
 
