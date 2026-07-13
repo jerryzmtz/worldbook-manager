@@ -14,6 +14,10 @@ type IndexedPromptMessage = {
   index: number;
   message: PromptMessageSnapshot;
 };
+type PromptMessageDifference =
+  | { kind: 'message_added'; afterItem: IndexedPromptMessage }
+  | { kind: 'message_removed'; beforeItem: IndexedPromptMessage }
+  | { kind: 'message_changed'; beforeItem: IndexedPromptMessage; afterItem: IndexedPromptMessage };
 
 export function createTextHash(text: string): string {
   let hash = 2166136261;
@@ -37,21 +41,17 @@ export function comparePromptRecords(
   const afterMessages = comparableMessages(after.messages);
   const hasOnlyPlaceholderChanges =
     beforeMessages.length !== before.messages.length || afterMessages.length !== after.messages.length;
-  const maxLength = Math.max(beforeMessages.length, afterMessages.length);
-  for (let index = 0; index < maxLength; index += 1) {
-    const beforeItem = beforeMessages[index];
-    const afterItem = afterMessages[index];
-    const beforeMessage = beforeItem?.message;
-    const afterMessage = afterItem?.message;
-
-    if (!beforeMessage && afterMessage) {
-      return buildMessageAddedDiff(afterItem.index, afterMessage, contextSize);
-    }
-    if (beforeMessage && !afterMessage) {
-      return buildMessageRemovedDiff(beforeItem.index, beforeMessage, contextSize);
-    }
-    if (!beforeMessage || !afterMessage) continue;
-
+  const difference = findFirstMessageDifference(beforeMessages, afterMessages);
+  if (difference?.kind === 'message_added') {
+    return buildMessageAddedDiff(difference.afterItem.index, difference.afterItem.message, contextSize);
+  }
+  if (difference?.kind === 'message_removed') {
+    return buildMessageRemovedDiff(difference.beforeItem.index, difference.beforeItem.message, contextSize);
+  }
+  if (difference?.kind === 'message_changed') {
+    const { beforeItem, afterItem } = difference;
+    const beforeMessage = beforeItem.message;
+    const afterMessage = afterItem.message;
     if (beforeMessage.role !== afterMessage.role) {
       return {
         kind: 'role_changed',
@@ -66,21 +66,18 @@ export function comparePromptRecords(
         context: buildDiffContext(beforeMessage.text, afterMessage.text, contextSize),
       };
     }
-
-    if (beforeMessage.hash !== afterMessage.hash || beforeMessage.text !== afterMessage.text) {
-      return {
-        kind: 'content_changed',
-        summary: `第 ${afterItem.index + 1} 条有效 ${afterMessage.role} 消息内容发生变化。`,
-        index: afterItem.index,
-        beforeIndex: beforeItem.index,
-        afterIndex: afterItem.index,
-        beforeRole: beforeMessage.role,
-        afterRole: afterMessage.role,
-        beforeLength: beforeMessage.length,
-        afterLength: afterMessage.length,
-        context: buildDiffContext(beforeMessage.text, afterMessage.text, contextSize),
-      };
-    }
+    return {
+      kind: 'content_changed',
+      summary: `第 ${afterItem.index + 1} 条有效 ${afterMessage.role} 消息内容发生变化。`,
+      index: afterItem.index,
+      beforeIndex: beforeItem.index,
+      afterIndex: afterItem.index,
+      beforeRole: beforeMessage.role,
+      afterRole: afterMessage.role,
+      beforeLength: beforeMessage.length,
+      afterLength: afterMessage.length,
+      context: buildDiffContext(beforeMessage.text, afterMessage.text, contextSize),
+    };
   }
 
   return {
@@ -103,6 +100,97 @@ function comparableMessages(messages: PromptMessageSnapshot[]): IndexedPromptMes
   return messages
     .map((message, index) => ({ index, message }))
     .filter(({ message }) => message.text.trim().length > 0);
+}
+
+function findFirstMessageDifference(
+  beforeMessages: IndexedPromptMessage[],
+  afterMessages: IndexedPromptMessage[],
+): PromptMessageDifference | null {
+  const costs = buildAlignmentCosts(beforeMessages, afterMessages);
+  let beforeIndex = 0;
+  let afterIndex = 0;
+
+  while (beforeIndex < beforeMessages.length || afterIndex < afterMessages.length) {
+    const beforeItem = beforeMessages[beforeIndex];
+    const afterItem = afterMessages[afterIndex];
+    if (!beforeItem && afterItem) return { kind: 'message_added', afterItem };
+    if (beforeItem && !afterItem) return { kind: 'message_removed', beforeItem };
+    if (!beforeItem || !afterItem) return null;
+
+    if (isSameMessage(beforeItem.message, afterItem.message)) {
+      beforeIndex += 1;
+      afterIndex += 1;
+      continue;
+    }
+
+    const currentCost = costs[beforeIndex][afterIndex];
+    const changedCost =
+      replacementCost(beforeItem.message, afterItem.message) + costs[beforeIndex + 1][afterIndex + 1];
+    const addedCost = 1 + costs[beforeIndex][afterIndex + 1];
+    const removedCost = 1 + costs[beforeIndex + 1][afterIndex];
+
+    if (beforeItem.message.role === afterItem.message.role && changedCost === currentCost) {
+      return { kind: 'message_changed', beforeItem, afterItem };
+    }
+
+    const addedIsBest = addedCost === currentCost;
+    const removedIsBest = removedCost === currentCost;
+    const beforeRemaining = beforeMessages.length - beforeIndex;
+    const afterRemaining = afterMessages.length - afterIndex;
+    if (addedIsBest && afterRemaining > beforeRemaining) return { kind: 'message_added', afterItem };
+    if (removedIsBest && beforeRemaining > afterRemaining) return { kind: 'message_removed', beforeItem };
+    if (changedCost === currentCost) return { kind: 'message_changed', beforeItem, afterItem };
+    if (addedIsBest) return { kind: 'message_added', afterItem };
+    if (removedIsBest) return { kind: 'message_removed', beforeItem };
+    return { kind: 'message_changed', beforeItem, afterItem };
+  }
+
+  return null;
+}
+
+function buildAlignmentCosts(
+  beforeMessages: IndexedPromptMessage[],
+  afterMessages: IndexedPromptMessage[],
+): number[][] {
+  const costs = Array.from({ length: beforeMessages.length + 1 }, () =>
+    Array<number>(afterMessages.length + 1).fill(0),
+  );
+  for (let beforeIndex = beforeMessages.length; beforeIndex >= 0; beforeIndex -= 1) {
+    costs[beforeIndex][afterMessages.length] = beforeMessages.length - beforeIndex;
+  }
+  for (let afterIndex = afterMessages.length; afterIndex >= 0; afterIndex -= 1) {
+    costs[beforeMessages.length][afterIndex] = afterMessages.length - afterIndex;
+  }
+
+  for (let beforeIndex = beforeMessages.length - 1; beforeIndex >= 0; beforeIndex -= 1) {
+    for (let afterIndex = afterMessages.length - 1; afterIndex >= 0; afterIndex -= 1) {
+      const beforeMessage = beforeMessages[beforeIndex].message;
+      const afterMessage = afterMessages[afterIndex].message;
+      if (isSameMessage(beforeMessage, afterMessage)) {
+        costs[beforeIndex][afterIndex] = costs[beforeIndex + 1][afterIndex + 1];
+        continue;
+      }
+      costs[beforeIndex][afterIndex] = Math.min(
+        replacementCost(beforeMessage, afterMessage) + costs[beforeIndex + 1][afterIndex + 1],
+        1 + costs[beforeIndex][afterIndex + 1],
+        1 + costs[beforeIndex + 1][afterIndex],
+      );
+    }
+  }
+
+  return costs;
+}
+
+function replacementCost(beforeMessage: PromptMessageSnapshot, afterMessage: PromptMessageSnapshot): number {
+  return beforeMessage.role === afterMessage.role ? 1 : 2;
+}
+
+function isSameMessage(beforeMessage: PromptMessageSnapshot, afterMessage: PromptMessageSnapshot): boolean {
+  return (
+    beforeMessage.role === afterMessage.role &&
+    beforeMessage.hash === afterMessage.hash &&
+    beforeMessage.text === afterMessage.text
+  );
 }
 
 export function buildFullTextSegments(

@@ -64,6 +64,77 @@ test('keeps original indexes after filtering empty placeholders', () => {
   assert.match(result.context.afterChanged, /changed/);
 });
 
+test('reports an assistant message inserted before an existing user message', () => {
+  const before = snapshot([
+    message('system', 'rules'),
+    message('user', 'dynamic variables'),
+  ]);
+  const after = snapshot([
+    message('system', 'rules'),
+    message('assistant', 'previous response'),
+    message('user', 'dynamic variables'),
+  ]);
+
+  const result = comparePromptRecords(before, after);
+
+  assert.equal(result.kind, 'message_added');
+  assert.equal(result.index, 1);
+  assert.equal(result.beforeIndex, null);
+  assert.equal(result.afterIndex, 1);
+  assert.equal(result.afterRole, 'assistant');
+});
+
+test('aligns an inserted assistant message even when the following user content changed', () => {
+  const before = snapshot([
+    message('system', 'rules'),
+    message('user', 'old dynamic variables'),
+  ]);
+  const after = snapshot([
+    message('system', 'rules'),
+    message('assistant', 'previous response'),
+    message('user', 'new dynamic variables'),
+  ]);
+
+  const result = comparePromptRecords(before, after);
+
+  assert.equal(result.kind, 'message_added');
+  assert.equal(result.beforeIndex, null);
+  assert.equal(result.afterIndex, 1);
+  assert.equal(result.afterRole, 'assistant');
+});
+
+test('reports a removed message without comparing shifted roles', () => {
+  const before = snapshot([
+    message('system', 'rules'),
+    message('assistant', 'removed response'),
+    message('user', 'dynamic variables'),
+  ]);
+  const after = snapshot([
+    message('system', 'rules'),
+    message('user', 'dynamic variables'),
+  ]);
+
+  const result = comparePromptRecords(before, after);
+
+  assert.equal(result.kind, 'message_removed');
+  assert.equal(result.beforeIndex, 1);
+  assert.equal(result.afterIndex, null);
+  assert.equal(result.beforeRole, 'assistant');
+});
+
+test('keeps a one-to-one role replacement as a role change', () => {
+  const before = snapshot([message('user', 'same content')]);
+  const after = snapshot([message('assistant', 'same content')]);
+
+  const result = comparePromptRecords(before, after);
+
+  assert.equal(result.kind, 'role_changed');
+  assert.equal(result.beforeIndex, 0);
+  assert.equal(result.afterIndex, 0);
+  assert.equal(result.beforeRole, 'user');
+  assert.equal(result.afterRole, 'assistant');
+});
+
 function snapshot(messages) {
   return {
     id: 'snapshot',
