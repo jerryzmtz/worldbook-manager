@@ -11,5 +11,8 @@ pnpm-debug.log*
 
 auto-imports.d.ts
 components.d.ts
+<<<<<<< HEAD
 
 参考资料/
+=======
+>>>>>>> ef49cc74019348a1696eda4d988d4f4ddc0d1b9b
