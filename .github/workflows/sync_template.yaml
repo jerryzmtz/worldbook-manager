@@ -22,6 +22,7 @@ jobs:
       - uses: AndreasAugustin/actions-template-sync@v2
         with:
           source_repo_path: StageDog/tavern_helper_template
+          upstream_branch: main
           pr_title: '[bot] 同步模板仓库的更新'
           pr_commit_msg: '[bot] bump template repository update'
           is_pr_cleanup: true
