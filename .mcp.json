@@ -1,1 +1,12 @@
+<<<<<<< HEAD
 .cursor/mcp.json
+=======
+{
+  "mcpServers": {
+    "chrome-devtools": {
+      "command": "pnpx",
+      "args": ["chrome-devtools-mcp@latest", "--autoConnect"]
+    }
+  }
+}
+>>>>>>> 1fccafa497a86147fb293397875ec0460136e4f6
